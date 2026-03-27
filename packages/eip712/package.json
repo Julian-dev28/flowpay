@@ -1,0 +1,14 @@
+{
+  "name": "@flowpay/eip712",
+  "version": "0.0.1",
+  "private": true,
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "@flowpay/tsconfig": "workspace:*",
+    "typescript": "5.6.3"
+  }
+}

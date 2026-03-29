@@ -1,0 +1,21 @@
+{
+  "name": "@flowpay/tx-submitter",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "dev": "tsx watch src/worker.ts",
+    "build": "tsc",
+    "start": "node dist/worker.js"
+  },
+  "dependencies": {
+    "bullmq": "5.21.0",
+    "ioredis": "5.4.1",
+    "zod": "3.23.4"
+  },
+  "devDependencies": {
+    "@flowpay/tsconfig": "workspace:*",
+    "@types/node": "22.10.3",
+    "typescript": "5.6.3",
+    "tsx": "4.19.2"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "@flowpay/indexer",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "build": "tsc",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "viem": "2.21.12",
+    "zod": "3.23.4"
+  },
+  "devDependencies": {
+    "@flowpay/tsconfig": "workspace:*",
+    "@types/node": "22.10.3",
+    "typescript": "5.6.3",
+    "tsx": "4.19.2"
+  }
+}

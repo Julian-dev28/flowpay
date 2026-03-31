@@ -22,6 +22,7 @@ contract PaymentRouterTest is Test {
         (merchant, merchantPk) = makeAddrAndKey("merchant");
 
         router = new PaymentRouter();
+        // Don't grant to owner, only to pauser
         router.grantRole(router.PAUSER_ROLE(), pauser);
     }
 

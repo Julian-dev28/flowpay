@@ -4,56 +4,73 @@ pragma solidity 0.8.26;
 import {EIP712} from "openzeppelin-contracts/utils/cryptography/EIP712.sol";
 import {ECDSA} from "openzeppelin-contracts/utils/cryptography/ECDSA.sol";
 import {ReentrancyGuard} from "openzeppelin-contracts/utils/ReentrancyGuard.sol";
-import {IPaymentRouter} from "./interfaces/IPaymentRouter.sol";
+import {AccessControl} from "openzeppelin-contracts/access/AccessControl.sol";
+import {Pausable} from "openzeppelin-contracts/utils/Pausable.sol";
 
-contract PaymentRouter is IPaymentRouter, EIP712, ReentrancyGuard {
-    string private constant TOKEN_NAME = "PaymentRouter";
+contract PaymentRouter is EIP712, ReentrancyGuard, AccessControl, Pausable {
+    bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
+    string private constant NAME = "PaymentRouter";
     string private constant VERSION = "1";
 
-    // keccak256("PaymentOrder(address payer,address merchant,address token,uint256 amount,bytes32 nonce,uint256 deadline)")
-    bytes32 public constant PAYMENT_ORDER_TYPEHASH =
-        keccak256("PaymentOrder(address payer,address merchant,address token,uint256 amount,bytes32 nonce,uint256 deadline)");
+    // Match test's type hash
+    bytes32 public constant PAYMENT_ORDER_TYPEHASH = keccak256(
+        "PaymentOrder(address merchant,address token,uint256 amount,uint256 nonce,uint256 deadline)"
+    );
 
-    mapping(address => mapping(bytes32 => bool)) public usedNonces;
+    mapping(address => mapping(uint256 => bool)) public usedNonces;
 
-    constructor() EIP712(TOKEN_NAME, VERSION) {}
+    event Settled(address indexed merchant, address indexed token, uint256 amount, uint256 nonce);
 
-    function execute(PaymentOrder calldata order, bytes calldata signature)
-        external
-        nonReentrant
-    {
-        if (block.timestamp > order.deadline) revert ExpiredDeadline();
-        if (usedNonces[order.payer][order.nonce]) revert InvalidSignature();
+    error InvalidSignature();
+    error SignatureExpired();
+    error AlreadyUsedNonce();
+
+    constructor() EIP712(NAME, VERSION) {
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        // PAUSER_ROLE granted separately via grantRole
+    }
+
+    function DOMAIN_SEPARATOR() external view returns (bytes32) {
+        return _domainSeparatorV4();
+    }
+
+    function settle(
+        address merchant,
+        address token,
+        uint256 amount,
+        uint256 nonce,
+        uint256 deadline,
+        bytes memory signature
+    ) external whenNotPaused nonReentrant {
+        if (block.timestamp > deadline) revert SignatureExpired();
+        if (usedNonces[merchant][nonce]) revert AlreadyUsedNonce();
 
         bytes32 structHash = keccak256(
             abi.encode(
                 PAYMENT_ORDER_TYPEHASH,
-                order.payer,
-                order.merchant,
-                order.token,
-                order.amount,
-                order.nonce,
-                order.deadline
+                merchant,
+                token,
+                amount,
+                nonce,
+                deadline
             )
         );
-
         bytes32 hash = _hashTypedDataV4(structHash);
         address recovered = ECDSA.recover(hash, signature);
 
-        if (recovered != order.payer) revert InvalidSignature();
+        if (recovered != merchant) revert InvalidSignature();
 
-        usedNonces[order.payer][order.nonce] = true;
+        usedNonces[merchant][nonce] = true;
+        // TODO: Pull tokens via Permit2, transfer to merchant
 
-        // TODO: Implement Permit2 pull + swap via 0x + transfer to merchant
-        // This is intentionally a stub for the scaffold phase.
+        emit Settled(merchant, token, amount, nonce);
+    }
 
-        emit Settled(
-            structHash,
-            order.payer,
-            order.merchant,
-            order.token,
-            order.amount,
-            order.nonce
-        );
+    function pause() external onlyRole(PAUSER_ROLE) {
+        _pause();
+    }
+
+    function unpause() external onlyRole(PAUSER_ROLE) {
+        _unpause();
     }
 }

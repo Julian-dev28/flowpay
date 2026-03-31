@@ -4,9 +4,10 @@ out = "out"
 libs = ["lib"]
 optimizer = true
 optimizer_runs = 200
+auto_detect_remappings = false
 
 remappings = [
-    "openzeppelin-contracts/=lib/openzeppelin-contracts/contracts/",
+    "openzeppelin-contracts/=lib/openzeppelin-contracts/",
     "permit2/=lib/permit2/src/"
 ]
 

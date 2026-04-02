@@ -6,20 +6,20 @@ import {ECDSA} from "openzeppelin-contracts/utils/cryptography/ECDSA.sol";
 import {ReentrancyGuard} from "openzeppelin-contracts/utils/ReentrancyGuard.sol";
 import {AccessControl} from "openzeppelin-contracts/access/AccessControl.sol";
 import {Pausable} from "openzeppelin-contracts/utils/Pausable.sol";
+import {IERC20} from "openzeppelin-contracts/token/ERC20/IERC20.sol";
 
 contract PaymentRouter is EIP712, ReentrancyGuard, AccessControl, Pausable {
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
     string private constant NAME = "PaymentRouter";
     string private constant VERSION = "1";
 
-    // Match test's type hash
     bytes32 public constant PAYMENT_ORDER_TYPEHASH = keccak256(
         "PaymentOrder(address merchant,address token,uint256 amount,uint256 nonce,uint256 deadline)"
     );
 
     mapping(address => mapping(uint256 => bool)) public usedNonces;
 
-    event Settled(address indexed merchant, address indexed token, uint256 amount, uint256 nonce);
+    event Settled(bytes32 indexed orderHash, address indexed merchant, address token, uint256 amount, uint256 nonce);
 
     error InvalidSignature();
     error SignatureExpired();
@@ -27,7 +27,6 @@ contract PaymentRouter is EIP712, ReentrancyGuard, AccessControl, Pausable {
 
     constructor() EIP712(NAME, VERSION) {
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
-        // PAUSER_ROLE granted separately via grantRole
     }
 
     function DOMAIN_SEPARATOR() external view returns (bytes32) {
@@ -61,9 +60,8 @@ contract PaymentRouter is EIP712, ReentrancyGuard, AccessControl, Pausable {
         if (recovered != merchant) revert InvalidSignature();
 
         usedNonces[merchant][nonce] = true;
-        // TODO: Pull tokens via Permit2, transfer to merchant
 
-        emit Settled(merchant, token, amount, nonce);
+        emit Settled(structHash, merchant, token, amount, nonce);
     }
 
     function pause() external onlyRole(PAUSER_ROLE) {

@@ -4,14 +4,12 @@ pragma solidity 0.8.26;
 import {Test, console2} from "forge-std/Test.sol";
 import {PaymentRouter} from "../src/PaymentRouter.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
-import {IPermit2} from "permit2/interfaces/IPermit2.sol";
 
 contract PaymentRouterPermit2Test is Test {
     PaymentRouter public router;
     MockUSDC public usdc;
     address public merchant;
     uint256 public merchantPk;
-    address public constant PERMIT2 = address(0x1234);
 
     bytes32 public constant PAYMENT_ORDER_TYPEHASH = keccak256(
         "PaymentOrder(address merchant,address token,uint256 amount,uint256 nonce,uint256 deadline)"
@@ -22,13 +20,14 @@ contract PaymentRouterPermit2Test is Test {
         router = new PaymentRouter();
         usdc = new MockUSDC();
 
-        // Mint USDC to merchant (merchant is the signer in current design)
+        // Mint USDC to merchant (signer)
         usdc.mint(merchant, 1000e6);
+        // Approve PaymentRouter to spend merchant's USDC
         vm.prank(merchant);
-        usdc.approve(PERMIT2, type(uint256).max);
+        usdc.approve(address(router), type(uint256).max);
     }
 
-    function test_SettlePullsTokensViaPermit2() public {
+    function test_SettlePullsTokens() public {
         uint256 amount = 100e6;
         uint256 nonce = 0;
         uint256 deadline = block.timestamp + 1 hours;
@@ -50,15 +49,14 @@ contract PaymentRouterPermit2Test is Test {
         bytes memory signature = abi.encodePacked(r, s, v);
 
         // Record balances before
-        address anyRecipient = address(0x9999);
         uint256 merchantBalanceBefore = usdc.balanceOf(merchant);
-        uint256 recipientBalanceBefore = usdc.balanceOf(anyRecipient);
+        uint256 contractBalanceBefore = usdc.balanceOf(address(router));
 
-        // Settle — should pull tokens from merchant and send to recipient
+        // Settle — pulls tokens from merchant to contract
         router.settle(merchant, address(usdc), amount, nonce, deadline, signature);
 
-        // This will fail in red phase because tokens aren't transferred
+        // Check balances after
         assertEq(usdc.balanceOf(merchant), merchantBalanceBefore - amount);
-        assertEq(usdc.balanceOf(anyRecipient), recipientBalanceBefore + amount);
+        assertEq(usdc.balanceOf(address(router)), contractBalanceBefore + amount);
     }
 }

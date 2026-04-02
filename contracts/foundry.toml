@@ -5,6 +5,7 @@ libs = ["lib"]
 optimizer = true
 optimizer_runs = 200
 auto_detect_remappings = false
+viaIR = true
 
 remappings = [
     "openzeppelin-contracts/=lib/openzeppelin-contracts/",

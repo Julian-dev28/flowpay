@@ -1,0 +1,7 @@
+PaymentRouterPermit2Test:test_SettlePullsTokens() (gas: 89968)
+PaymentRouterReplayTest:test_RevertWhen_NonceReplayed() (gas: 91805)
+PaymentRouterTest:test_PauseByPauser() (gas: 60988)
+PaymentRouterTest:test_RevertWhen_InvalidSignature() (gas: 29976)
+PaymentRouterTest:test_RevertWhen_NonPauserTriesPause() (gas: 11141)
+PaymentRouterTest:test_RevertWhen_SignatureExpired() (gas: 26032)
+PaymentRouterTest:test_SettleWithValidSignature() (gas: 87583)

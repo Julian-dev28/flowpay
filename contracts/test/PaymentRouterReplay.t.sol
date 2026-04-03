@@ -3,12 +3,13 @@ pragma solidity 0.8.26;
 
 import {Test, console2} from "forge-std/Test.sol";
 import {PaymentRouter} from "../src/PaymentRouter.sol";
+import {MockUSDC} from "./mocks/MockUSDC.sol";
 
 contract PaymentRouterReplayTest is Test {
     PaymentRouter public router;
+    MockUSDC public usdc;
     address public merchant;
     uint256 public merchantPk;
-    address public constant USDC = address(0x1);
 
     bytes32 public constant PAYMENT_ORDER_TYPEHASH = keccak256(
         "PaymentOrder(address merchant,address token,uint256 amount,uint256 nonce,uint256 deadline)"
@@ -17,6 +18,12 @@ contract PaymentRouterReplayTest is Test {
     function setUp() public {
         (merchant, merchantPk) = makeAddrAndKey("merchant");
         router = new PaymentRouter();
+        usdc = new MockUSDC();
+
+        // Mint USDC to merchant and approve router
+        usdc.mint(merchant, 1000e6);
+        vm.prank(merchant);
+        usdc.approve(address(router), type(uint256).max);
     }
 
     function test_RevertWhen_NonceReplayed() public {
@@ -29,7 +36,7 @@ contract PaymentRouterReplayTest is Test {
             abi.encode(
                 PAYMENT_ORDER_TYPEHASH,
                 merchant,
-                USDC,
+                address(usdc),
                 amount,
                 nonce,
                 deadline
@@ -40,10 +47,10 @@ contract PaymentRouterReplayTest is Test {
         bytes memory signature = abi.encodePacked(r, s, v);
 
         // First settle should succeed
-        router.settle(merchant, USDC, amount, nonce, deadline, signature);
+        router.settle(merchant, address(usdc), amount, nonce, deadline, signature);
 
         // Second settle with same nonce should revert
         vm.expectRevert(PaymentRouter.AlreadyUsedNonce.selector);
-        router.settle(merchant, USDC, amount, nonce, deadline, signature);
+        router.settle(merchant, address(usdc), amount, nonce, deadline, signature);
     }
 }

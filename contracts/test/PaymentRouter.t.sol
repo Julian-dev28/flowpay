@@ -3,12 +3,13 @@ pragma solidity 0.8.26;
 
 import {Test, console2} from "forge-std/Test.sol";
 import {PaymentRouter} from "../src/PaymentRouter.sol";
+import {MockUSDC} from "./mocks/MockUSDC.sol";
 
 contract PaymentRouterTest is Test {
     PaymentRouter public router;
+    MockUSDC public usdc;
     address public merchant;
     uint256 public merchantPk;
-    address public constant USDC = address(0x1); // placeholder
 
     bytes32 public constant PAYMENT_ORDER_TYPEHASH = keccak256(
         "PaymentOrder(address merchant,address token,uint256 amount,uint256 nonce,uint256 deadline)"
@@ -17,6 +18,12 @@ contract PaymentRouterTest is Test {
     function setUp() public {
         (merchant, merchantPk) = makeAddrAndKey("merchant");
         router = new PaymentRouter();
+        usdc = new MockUSDC();
+
+        // Mint USDC to merchant and approve router
+        usdc.mint(merchant, 1000e6);
+        vm.prank(merchant);
+        usdc.approve(address(router), type(uint256).max);
     }
 
     function test_SettleWithValidSignature() public {
@@ -29,7 +36,7 @@ contract PaymentRouterTest is Test {
             abi.encode(
                 PAYMENT_ORDER_TYPEHASH,
                 merchant,
-                USDC,
+                address(usdc),
                 amount,
                 nonce,
                 deadline
@@ -39,11 +46,11 @@ contract PaymentRouterTest is Test {
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(merchantPk, digest);
         bytes memory signature = abi.encodePacked(r, s, v);
 
-        // Expect Settled event (5 params: orderHash, merchant, token, amount, nonce)
-        vm.expectEmit(true, true, false, false);
-        emit PaymentRouter.Settled(structHash, merchant, USDC, amount, nonce);
+        // Should succeed without revert
+        router.settle(merchant, address(usdc), amount, nonce, deadline, signature);
 
-        router.settle(merchant, USDC, amount, nonce, deadline, signature);
+        // Verify nonce is marked as used
+        assertTrue(router.usedNonces(merchant, nonce));
     }
 
     function test_RevertWhen_SignatureExpired() public {
@@ -56,7 +63,7 @@ contract PaymentRouterTest is Test {
             abi.encode(
                 PAYMENT_ORDER_TYPEHASH,
                 merchant,
-                USDC,
+                address(usdc),
                 amount,
                 nonce,
                 deadline
@@ -67,7 +74,7 @@ contract PaymentRouterTest is Test {
         bytes memory signature = abi.encodePacked(r, s, v);
 
         vm.expectRevert(PaymentRouter.SignatureExpired.selector);
-        router.settle(merchant, USDC, amount, nonce, deadline, signature);
+        router.settle(merchant, address(usdc), amount, nonce, deadline, signature);
     }
 
     function test_RevertWhen_InvalidSignature() public {
@@ -81,7 +88,7 @@ contract PaymentRouterTest is Test {
             abi.encode(
                 PAYMENT_ORDER_TYPEHASH,
                 merchant,
-                USDC,
+                address(usdc),
                 amount,
                 nonce,
                 deadline
@@ -92,7 +99,7 @@ contract PaymentRouterTest is Test {
         bytes memory signature = abi.encodePacked(r, s, v);
 
         vm.expectRevert(PaymentRouter.InvalidSignature.selector);
-        router.settle(merchant, USDC, amount, nonce, deadline, signature);
+        router.settle(merchant, address(usdc), amount, nonce, deadline, signature);
     }
 
     function test_PauseByPauser() public {

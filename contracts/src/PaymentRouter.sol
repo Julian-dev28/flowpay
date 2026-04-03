@@ -61,6 +61,9 @@ contract PaymentRouter is EIP712, ReentrancyGuard, AccessControl, Pausable {
 
         usedNonces[merchant][nonce] = true;
 
+        // Pull tokens from merchant to this contract
+        IERC20(token).transferFrom(merchant, address(this), amount);
+
         emit Settled(structHash, merchant, token, amount, nonce);
     }
 

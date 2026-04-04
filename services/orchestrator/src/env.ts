@@ -5,6 +5,7 @@ const envSchema = z.object({
   HOST: z.string().default("0.0.0.0"),
   LOG_LEVEL: z.string().default("info"),
   PROMETHEUS_ENABLED: z.string().default("true"),
+  REDIS_URL: z.string().url().default("redis://localhost:6379"),
 });
 
 export type Env = z.infer<typeof envSchema>;

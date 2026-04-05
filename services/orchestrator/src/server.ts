@@ -27,9 +27,34 @@ app.get("/healthz", async () => {
   return { status: "ok" };
 });
 
-// Readiness check
+// Readiness check - deep health
 app.get("/readyz", async () => {
-  return { status: "ok" };
+  const checks = {
+    redis: false,
+    queue: false,
+  };
+
+  // Check Redis
+  try {
+    const pong = await connection.ping();
+    checks.redis = pong === "PONG";
+  } catch {
+    checks.redis = false;
+  }
+
+  // Check queue (BullMQ queue is available)
+  try {
+    const jobCounts = await paymentQueue.getJobCounts();
+    checks.queue = jobCounts != null;
+  } catch {
+    checks.queue = false;
+  }
+
+  const isReady = checks.redis && checks.queue;
+  return {
+    status: isReady ? "ready" : "not ready",
+    checks,
+  };
 });
 
 // Metrics endpoint

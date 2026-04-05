@@ -10,3 +10,11 @@ export const PayRequestSchema = z.object({
 });
 
 export type PayRequest = z.infer<typeof PayRequestSchema>;
+
+export const QuoteRequestSchema = z.object({
+  sellToken: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+  buyToken: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+  sellAmount: z.string().regex(/^\d+$/),
+});
+
+export type QuoteRequest = z.infer<typeof QuoteRequestSchema>;

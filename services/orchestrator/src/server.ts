@@ -3,7 +3,7 @@ import { env } from "./env";
 import promClient from "prom-client";
 import { Queue } from "bullmq";
 import IORedis from "ioredis";
-import { PayRequestSchema } from "./schemas";
+import { PayRequestSchema, QuoteRequestSchema } from "./schemas";
 import { randomUUID } from "crypto";
 
 const app = Fastify({
@@ -36,6 +36,29 @@ app.get("/readyz", async () => {
 app.get("/metrics", async (_request, reply) => {
   reply.header("Content-Type", register.contentType);
   return reply.send(await register.metrics());
+});
+
+// Quote endpoint - return stub quote (0x integration later)
+app.get("/quote", async (request) => {
+  const parseResult = QuoteRequestSchema.safeParse(request.query);
+  if (!parseResult.success) {
+    return { error: "Invalid query parameters", details: parseResult.error.issues };
+  }
+
+  const { sellToken, buyToken, sellAmount } = parseResult.data;
+
+  // Stub quote - 0x integration in later task
+  return {
+    chainId: 84532, // Base Sepolia
+    sellToken,
+    buyToken,
+    sellAmount,
+    buyAmount: sellAmount, // dummy: 1:1 for stub
+    allowanceTarget: "0x0000000000000000000000000000000000000001",
+    to: "0x0000000000000000000000000000000000000002",
+    data: "0x",
+    value: "0",
+  };
 });
 
 // Pay endpoint - accept payment intent and enqueue for processing

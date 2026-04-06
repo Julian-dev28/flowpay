@@ -99,10 +99,16 @@ app.post("/pay", async (request, reply) => {
   const payRequest = parseResult.data;
   const paymentId = randomUUID();
 
-  // Enqueue job to tx-submitter
+  // Enqueue job to tx-submitter with retry options
   const job = await paymentQueue.add("process-payment", {
     paymentId,
     ...payRequest,
+  }, {
+    attempts: 3,
+    backoff: {
+      type: "exponential",
+      delay: 1000,
+    },
   });
 
   reply.code(202).send({

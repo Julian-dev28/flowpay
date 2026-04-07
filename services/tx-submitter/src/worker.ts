@@ -1,4 +1,4 @@
-import { Worker } from "bullmq";
+import { Worker, Queue } from "bullmq";
 import { env } from "./env";
 import { createWalletClient, http, parseAbi } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
@@ -8,6 +8,9 @@ const connection = {
   host: env.REDIS_HOST,
   port: parseInt(env.REDIS_PORT, 10),
 };
+
+// Dead-letter queue for permanently failed jobs
+const deadLetterQueue = new Queue("payment.dead-letter", { connection });
 
 // PaymentRouter ABI
 const paymentRouterABI = parseAbi([
@@ -59,8 +62,19 @@ worker.on("completed", (job) => {
   console.log(`Job ${job.id} completed`);
 });
 
-worker.on("failed", (job, err) => {
+worker.on("failed", async (job, err) => {
   console.error(`Job ${job?.id} failed:`, err);
+  
+  // Move to dead-letter queue after max attempts
+  if (job && job.attemptsMade >= (job.opts?.attempts || 3)) {
+    await deadLetterQueue.add("dead-letter", {
+      originalJobId: job.id,
+      paymentId: job.data.paymentId,
+      failedReason: err?.message || "Unknown error",
+      data: job.data,
+    });
+    console.log(`Job ${job.id} moved to dead-letter queue`);
+  }
 });
 
 console.log("tx-submitter worker started, listening on payment.submit queue");
@@ -69,6 +83,7 @@ console.log("tx-submitter worker started, listening on payment.submit queue");
 const shutdown = async () => {
   console.log("Shutting down tx-submitter...");
   await worker.close();
+  await deadLetterQueue.close();
   process.exit(0);
 };
 process.on("SIGTERM", shutdown);

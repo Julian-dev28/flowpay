@@ -1,4 +1,5 @@
 import Fastify from "fastify";
+import pino from "pino";
 import { env } from "./env";
 import promClient from "prom-client";
 import { Queue } from "bullmq";
@@ -6,8 +7,13 @@ import IORedis from "ioredis";
 import { PayRequestSchema, QuoteRequestSchema } from "./schemas";
 import { randomUUID } from "crypto";
 
+const logger = pino({
+  level: env.LOG_LEVEL,
+  transport: env.LOG_LEVEL === "debug" ? { target: "pino-pretty" } : undefined,
+});
+
 const app = Fastify({
-  logger: true,
+  logger: logger,
 });
 
 // Redis connection for BullMQ
@@ -131,9 +137,9 @@ process.on("SIGINT", shutdown);
 const start = async () => {
   try {
     await app.listen({ port: parseInt(env.PORT, 10), host: env.HOST });
-    console.log(`Orchestrator listening on ${env.HOST}:${env.PORT}`);
+    logger.info(`Orchestrator listening on ${env.HOST}:${env.PORT}`);
   } catch (err) {
-    console.error(err);
+    logger.error(err);
     process.exit(1);
   }
 };

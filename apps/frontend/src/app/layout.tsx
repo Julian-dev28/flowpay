@@ -1,16 +1,20 @@
-import type { Metadata } from "next";
+"use client";
+
 import { Inter } from "next/font/google";
-import { WagmiProvider } from "wagmi";
-import { RainbowKitProvider } from "@rainbow-me/rainbowkit";
-import { config } from "../lib/wagmi.js";
-import "@rainbow-me/rainbowkit/styles.css";
+import { WagmiProvider, createConfig, http } from "wagmi";
+import { baseSepolia } from "wagmi/chains";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 const inter = Inter({ subsets: ["latin"] });
 
-export const metadata: Metadata = {
-  title: "FlowPay",
-  description: "Mesh-style crypto payments orchestration",
-};
+const queryClient = new QueryClient();
+
+const config = createConfig({
+  chains: [baseSepolia],
+  transports: {
+    [baseSepolia.id]: http(),
+  },
+});
 
 export default function RootLayout({
   children,
@@ -21,9 +25,9 @@ export default function RootLayout({
     <html lang="en">
       <body className={inter.className}>
         <WagmiProvider config={config}>
-          <RainbowKitProvider>
+          <QueryClientProvider client={queryClient}>
             {children}
-          </RainbowKitProvider>
+          </QueryClientProvider>
         </WagmiProvider>
       </body>
     </html>

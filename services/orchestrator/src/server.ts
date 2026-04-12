@@ -28,6 +28,45 @@ const paymentQueue = new Queue("payment.submit", { connection });
 const register = new promClient.Registry();
 promClient.collectDefaultMetrics({ register });
 
+// Custom metrics
+const paymentRequestsTotal = new promClient.Counter({
+  name: "flowpay_payment_requests_total",
+  help: "Total payment requests",
+  labelNames: ["status"],
+  registers: [register],
+});
+
+const quoteRequestsTotal = new promClient.Counter({
+  name: "flowpay_quote_requests_total",
+  help: "Total quote requests",
+  registers: [register],
+});
+
+const requestDuration = new promClient.Histogram({
+  name: "flowpay_request_duration_seconds",
+  help: "Request duration in seconds",
+  labelNames: ["method", "route", "status_code"],
+  buckets: [0.1, 0.5, 1, 2, 5],
+  registers: [register],
+});
+
+// Add request ID and timing hook
+app.addHook("onRequest", async (request, _reply) => {
+  (request as any).startTime = Date.now();
+  (request as any).requestId = randomUUID();
+  request.headers['x-request-id'] = (request as any).requestId;
+});
+
+app.addHook("onResponse", async (request, reply) => {
+  const duration = (Date.now() - (request as any).startTime) / 1000;
+  const route = request.url?.split('?')[0] || "unknown";
+  requestDuration.observe(
+    { method: request.method, route, status_code: reply.statusCode.toString() },
+    duration
+  );
+  logger.info({ requestId: (request as any).requestId, method: request.method, route, statusCode: reply.statusCode, duration }, "request completed");
+});
+
 // Health check
 app.get("/healthz", async () => {
   return { status: "ok" };
@@ -71,6 +110,8 @@ app.get("/metrics", async (_request, reply) => {
 
 // Quote endpoint - return stub quote (0x integration later)
 app.get("/quote", async (request) => {
+  quoteRequestsTotal.inc();
+  
   const parseResult = QuoteRequestSchema.safeParse(request.query);
   if (!parseResult.success) {
     return { error: "Invalid query parameters", details: parseResult.error.issues };
@@ -96,6 +137,7 @@ app.get("/quote", async (request) => {
 app.post("/pay", async (request, reply) => {
   const parseResult = PayRequestSchema.safeParse(request.body);
   if (!parseResult.success) {
+    paymentRequestsTotal.inc({ status: "error" });
     return reply.code(400).send({
       error: "Invalid request body",
       details: parseResult.error.issues,
@@ -117,6 +159,7 @@ app.post("/pay", async (request, reply) => {
     },
   });
 
+  paymentRequestsTotal.inc({ status: "success" });
   reply.code(202).send({
     jobId: job.id,
     paymentId,

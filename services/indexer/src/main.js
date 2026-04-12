@@ -7,6 +7,8 @@ const client = (0, viem_1.createPublicClient)({
     chain: chains_1.baseSepolia,
     transport: (0, viem_1.http)(env_1.env.RPC_URL),
 });
+// In-memory store for Settled events (extend to DB later)
+const settledEvents = [];
 // PaymentRouter ABI
 const paymentRouterABI = (0, viem_1.parseAbi)([
     "event Settled(bytes32 indexed orderHash, address indexed merchant, address token, uint256 amount, uint256 nonce)",
@@ -19,13 +21,16 @@ const unwatch = client.watchContractEvent({
     eventName: 'Settled',
     onLogs: (logs) => {
         for (const log of logs) {
-            console.log('Settled event:', {
+            const event = {
                 orderHash: log.args.orderHash,
                 merchant: log.args.merchant,
                 token: log.args.token,
-                amount: log.args.amount?.toString(),
-                nonce: log.args.nonce?.toString(),
-            });
+                amount: log.args.amount?.toString() || "",
+                nonce: log.args.nonce?.toString() || "",
+                timestamp: Date.now(),
+            };
+            settledEvents.push(event);
+            console.log('Settled event saved:', event);
         }
     },
 });

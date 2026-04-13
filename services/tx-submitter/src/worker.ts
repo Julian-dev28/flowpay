@@ -1,6 +1,6 @@
 import { Worker, Queue } from "bullmq";
 import { env } from "./env";
-import { createWalletClient, http, parseAbi } from "viem";
+import { createWalletClient, http, parseAbi, zeroAddress } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia } from "viem/chains";
 
@@ -34,8 +34,8 @@ const worker = new Worker(
 
     // TODO: Replace with actual deployed contract address
     const contractAddress = env.PAYMENT_ROUTER_ADDRESS as `0x${string}`;
-    if (contractAddress === "0x0000000000000000000000000000000000000") {
-      console.log("Stub: would call settle() on PaymentRouter");
+    if (contractAddress.toLowerCase() === zeroAddress) {
+      console.log("Stub: PAYMENT_ROUTER_ADDRESS unset, skipping settle() call");
       return { status: "stub", paymentId, jobId: job.id };
     }
 

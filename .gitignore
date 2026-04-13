@@ -6,3 +6,15 @@ dist/
 !.env.example
 turbo.log
 pnpm-debug.log*
+
+# Build artifacts — never commit
+.next/
+.turbo/
+out/
+build/
+*.tsbuildinfo
+
+# Foundry
+contracts/cache/
+contracts/out/
+contracts/broadcast/

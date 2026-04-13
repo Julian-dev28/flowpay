@@ -2,10 +2,10 @@
 
 ## Overview
 
-`PaymentRouter.sol` — EIP-712 signed payments with Permit2 integration, pausable, access-controlled.
+`PaymentRouter.sol` — EIP-712 signed payment intents with `AccessControl`, `Pausable`, and per-`(merchant, nonce)` replay protection. Tokens are pulled via standard `IERC20.transferFrom` (the router holds them; no merchant payout step yet — see QA_REPORT.md).
 
-**Deployed on:** Base Sepolia (84532)  
-**Coverage:** 90% lines, 95% statements, 100% branches
+**Deployed on:** not yet (no deploy script committed). Designed for Base Sepolia (84532).
+**Coverage:** regenerate with `forge coverage` — do not quote stale figures.
 
 ---
 
@@ -145,7 +145,7 @@ forge snapshot          # Gas snapshot
 **Test Suites:**
 - `PaymentRouterTest` — 5 tests (signature, expiry, pause)
 - `PaymentRouterReplayTest` — 1 test (nonce replay)
-- `PaymentRouterPermit2Test` — 1 test (token transfer)
+- `PaymentRouterPermit2Test` — 1 test (token transfer; **misnomer** — does not use Permit2, see QA_REPORT.md C2)
 
 **Total:** 7 tests, all passing ✅
 

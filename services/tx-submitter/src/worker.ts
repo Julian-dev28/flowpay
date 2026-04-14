@@ -1,6 +1,13 @@
 import { Worker, Queue } from "bullmq";
 import { env } from "./env";
-import { createWalletClient, http, parseAbi, zeroAddress } from "viem";
+import {
+  createWalletClient,
+  http,
+  parseAbi,
+  zeroAddress,
+  type WalletClient,
+  type Account,
+} from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia } from "viem/chains";
 
@@ -18,13 +25,26 @@ const paymentRouterABI = parseAbi([
   "event Settled(bytes32 indexed orderHash, address indexed merchant, address token, uint256 amount, uint256 nonce)",
 ]);
 
-// Create wallet client for signing transactions
-const account = privateKeyToAccount(env.PRIVATE_KEY as `0x${string}`);
-const walletClient = createWalletClient({
-  account,
-  chain: baseSepolia,
-  transport: http(env.CHAIN_RPC_URL),
-});
+// Lazily construct the wallet client only when we have a real key.
+// privateKeyToAccount() crashes on invalid scalars (e.g. 0x000…0), so we must
+// never build it from a sentinel value.
+let walletClient: WalletClient | null = null;
+let walletAddress: `0x${string}` | null = null;
+if (env.PRIVATE_KEY) {
+  const account: Account = privateKeyToAccount(env.PRIVATE_KEY as `0x${string}`);
+  walletClient = createWalletClient({
+    account,
+    chain: baseSepolia,
+    transport: http(env.CHAIN_RPC_URL),
+  });
+  walletAddress = account.address;
+  console.log(`tx-submitter wallet loaded: ${walletAddress}`);
+} else {
+  console.log("tx-submitter: PRIVATE_KEY not set — worker runs in stub mode");
+}
+
+const routerAddress = env.PAYMENT_ROUTER_ADDRESS.toLowerCase() as `0x${string}`;
+const routerConfigured = routerAddress !== zeroAddress;
 
 const worker = new Worker(
   "payment.submit",
@@ -32,20 +52,31 @@ const worker = new Worker(
     const { paymentId, merchant, token, amount, nonce, deadline, signature } = job.data;
     console.log(`Processing job ${job.id} for payment ${paymentId}:`, { merchant, token, amount });
 
-    // TODO: Replace with actual deployed contract address
-    const contractAddress = env.PAYMENT_ROUTER_ADDRESS as `0x${string}`;
-    if (contractAddress.toLowerCase() === zeroAddress) {
-      console.log("Stub: PAYMENT_ROUTER_ADDRESS unset, skipping settle() call");
-      return { status: "stub", paymentId, jobId: job.id };
+    // Stub mode: no router deployed or no signing key — log and ack.
+    if (!routerConfigured || !walletClient) {
+      const reason = !routerConfigured
+        ? "PAYMENT_ROUTER_ADDRESS unset"
+        : "PRIVATE_KEY unset";
+      console.log(`Stub mode (${reason}): skipping settle() call`);
+      return { status: "stub", reason, paymentId, jobId: job.id };
     }
 
     // Call contract's settle function
     try {
       const hash = await walletClient.writeContract({
-        address: contractAddress,
+        account: walletClient.account!,
+        chain: baseSepolia,
+        address: env.PAYMENT_ROUTER_ADDRESS as `0x${string}`,
         abi: paymentRouterABI,
         functionName: "settle",
-        args: [merchant as `0x${string}`, token as `0x${string}`, BigInt(amount), BigInt(nonce), BigInt(deadline), signature as `0x${string}`],
+        args: [
+          merchant as `0x${string}`,
+          token as `0x${string}`,
+          BigInt(amount),
+          BigInt(nonce),
+          BigInt(deadline),
+          signature as `0x${string}`,
+        ],
       });
 
       console.log(`Transaction submitted: ${hash}`);
@@ -64,7 +95,7 @@ worker.on("completed", (job) => {
 
 worker.on("failed", async (job, err) => {
   console.error(`Job ${job?.id} failed:`, err);
-  
+
   // Move to dead-letter queue after max attempts
   if (job && job.attemptsMade >= (job.opts?.attempts || 3)) {
     await deadLetterQueue.add("dead-letter", {

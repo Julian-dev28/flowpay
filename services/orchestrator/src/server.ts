@@ -1,5 +1,4 @@
 import Fastify from "fastify";
-import pino from "pino";
 import { env } from "./env";
 import promClient from "prom-client";
 import { Queue } from "bullmq";
@@ -7,14 +6,15 @@ import IORedis from "ioredis";
 import { PayRequestSchema, QuoteRequestSchema } from "./schemas";
 import { randomUUID } from "crypto";
 
-const logger = pino({
-  level: env.LOG_LEVEL,
-  transport: env.LOG_LEVEL === "debug" ? { target: "pino-pretty" } : undefined,
-});
-
 const app = Fastify({
-  logger: logger,
+  logger: {
+    level: env.LOG_LEVEL,
+    ...(env.LOG_LEVEL === "debug"
+      ? { transport: { target: "pino-pretty" } }
+      : {}),
+  },
 });
+const logger = app.log;
 
 // Redis connection for BullMQ
 const connection = new IORedis(env.REDIS_URL || "redis://localhost:6379", {

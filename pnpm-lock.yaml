@@ -46,6 +46,8 @@ importers:
         specifier: 5.6.3
         version: 5.6.3
 
+  contracts: {}
+
   packages/eip712:
     devDependencies:
       '@flowpay/tsconfig':

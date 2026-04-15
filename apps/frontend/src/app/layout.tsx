@@ -1,20 +1,13 @@
-"use client";
-
+import type { Metadata } from "next";
 import { Inter } from "next/font/google";
-import { WagmiProvider, createConfig, http } from "wagmi";
-import { baseSepolia } from "wagmi/chains";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { Providers } from "@/components/providers";
 
 const inter = Inter({ subsets: ["latin"] });
 
-const queryClient = new QueryClient();
-
-const config = createConfig({
-  chains: [baseSepolia],
-  transports: {
-    [baseSepolia.id]: http(),
-  },
-});
+export const metadata: Metadata = {
+  title: "FlowPay",
+  description: "EIP-712 signed crypto-payment orchestration on Base",
+};
 
 export default function RootLayout({
   children,
@@ -24,11 +17,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className={inter.className}>
-        <WagmiProvider config={config}>
-          <QueryClientProvider client={queryClient}>
-            {children}
-          </QueryClientProvider>
-        </WagmiProvider>
+        <Providers>{children}</Providers>
       </body>
     </html>
   );

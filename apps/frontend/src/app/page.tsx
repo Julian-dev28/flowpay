@@ -1,7 +1,6 @@
 "use client";
 
 import { useAccount, useConnect } from "wagmi";
-import { parseEther } from "viem";
 
 export default function Home() {
   const { isConnected, address } = useAccount();

@@ -5,6 +5,7 @@ import { Queue } from "bullmq";
 import IORedis from "ioredis";
 import { PayRequestSchema, QuoteRequestSchema } from "./schemas";
 import { randomUUID } from "crypto";
+// types/fastify.d.ts augments FastifyRequest with `requestId` and `startTime`
 
 const app = Fastify({
   logger: {
@@ -15,6 +16,10 @@ const app = Fastify({
   },
 });
 const logger = app.log;
+
+// Strongly-typed request decorators so we don't reach for `as any` in hooks.
+app.decorateRequest("requestId", "");
+app.decorateRequest("startTime", 0);
 
 // Redis connection for BullMQ
 const connection = new IORedis(env.REDIS_URL || "redis://localhost:6379", {
@@ -52,19 +57,28 @@ const requestDuration = new promClient.Histogram({
 
 // Add request ID and timing hook
 app.addHook("onRequest", async (request, _reply) => {
-  (request as any).startTime = Date.now();
-  (request as any).requestId = randomUUID();
-  request.headers['x-request-id'] = (request as any).requestId;
+  request.startTime = Date.now();
+  request.requestId = randomUUID();
+  request.headers["x-request-id"] = request.requestId;
 });
 
 app.addHook("onResponse", async (request, reply) => {
-  const duration = (Date.now() - (request as any).startTime) / 1000;
-  const route = request.url?.split('?')[0] || "unknown";
+  const duration = (Date.now() - request.startTime) / 1000;
+  const route = request.url?.split("?")[0] || "unknown";
   requestDuration.observe(
     { method: request.method, route, status_code: reply.statusCode.toString() },
     duration
   );
-  logger.info({ requestId: (request as any).requestId, method: request.method, route, statusCode: reply.statusCode, duration }, "request completed");
+  logger.info(
+    {
+      requestId: request.requestId,
+      method: request.method,
+      route,
+      statusCode: reply.statusCode,
+      duration,
+    },
+    "request completed"
+  );
 });
 
 // Health check
@@ -79,20 +93,18 @@ app.get("/readyz", async () => {
     queue: false,
   };
 
-  // Check Redis
   try {
     const pong = await connection.ping();
     checks.redis = pong === "PONG";
-  } catch {
-    checks.redis = false;
+  } catch (err) {
+    logger.warn({ err }, "readyz: redis ping failed");
   }
 
-  // Check queue (BullMQ queue is available)
   try {
     const jobCounts = await paymentQueue.getJobCounts();
     checks.queue = jobCounts != null;
-  } catch {
-    checks.queue = false;
+  } catch (err) {
+    logger.warn({ err }, "readyz: queue check failed");
   }
 
   const isReady = checks.redis && checks.queue;
@@ -111,7 +123,7 @@ app.get("/metrics", async (_request, reply) => {
 // Quote endpoint - return stub quote (0x integration later)
 app.get("/quote", async (request) => {
   quoteRequestsTotal.inc();
-  
+
   const parseResult = QuoteRequestSchema.safeParse(request.query);
   if (!parseResult.success) {
     return { error: "Invalid query parameters", details: parseResult.error.issues };
@@ -147,17 +159,20 @@ app.post("/pay", async (request, reply) => {
   const payRequest = parseResult.data;
   const paymentId = randomUUID();
 
-  // Enqueue job to tx-submitter with retry options
-  const job = await paymentQueue.add("process-payment", {
-    paymentId,
-    ...payRequest,
-  }, {
-    attempts: 3,
-    backoff: {
-      type: "exponential",
-      delay: 1000,
+  const job = await paymentQueue.add(
+    "process-payment",
+    {
+      paymentId,
+      ...payRequest,
     },
-  });
+    {
+      attempts: 3,
+      backoff: {
+        type: "exponential",
+        delay: 1000,
+      },
+    }
+  );
 
   paymentRequestsTotal.inc({ status: "success" });
   reply.code(202).send({
@@ -168,7 +183,7 @@ app.post("/pay", async (request, reply) => {
 
 // Graceful shutdown
 const shutdown = async () => {
-  console.log("Shutting down orchestrator...");
+  logger.info("Shutting down orchestrator…");
   await paymentQueue.close();
   await app.close();
   process.exit(0);

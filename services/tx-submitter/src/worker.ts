@@ -86,7 +86,13 @@ const worker = new Worker(
       throw err; // Let BullMQ handle retry
     }
   },
-  { connection }
+  {
+    connection,
+    // Serialize jobs on a single EOA — viem fetches nonce per call, so parallel
+    // writes race and produce "nonce too low" / replaced-tx errors. A real
+    // implementation would track a local nonce counter under a mutex.
+    concurrency: 1,
+  }
 );
 
 worker.on("completed", (job) => {

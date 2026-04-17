@@ -141,6 +141,13 @@ contract PaymentRouterTest is Test {
         router.pause();
     }
 
+    function test_UnpauseByPauser() public {
+        router.grantRole(router.PAUSER_ROLE(), address(this));
+        router.pause();
+        router.unpause();
+        assertFalse(router.paused());
+    }
+
     function test_RevertWhen_PausedSettleCalled() public {
         router.grantRole(router.PAUSER_ROLE(), address(this));
         router.pause();

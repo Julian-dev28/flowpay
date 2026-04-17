@@ -2,7 +2,7 @@
 
 EIP-712 signed crypto-payment orchestration on Base. Monorepo: Solidity contracts, a Fastify orchestrator, a BullMQ tx-submitter worker, an event indexer, and a Next.js frontend.
 
-> Status: scaffold + happy path. PaymentRouter ships with 9 passing forge tests. Frontend connects a wallet via wagmi. Backend services boot cleanly and run end-to-end against a local anvil (see `docs/DEMO.md`). See QA_REPORT.md for the candid bug list and how it has been worked down.
+> Status: scaffold + happy path. PaymentRouter ships with 10 passing forge tests (100% line/statement/branch/function coverage). Frontend connects a wallet via wagmi. Backend services boot cleanly and run end-to-end against a local anvil (see `docs/DEMO.md`). See QA_REPORT.md for the candid bug list and how it has been worked down.
 
 ## Architecture
 

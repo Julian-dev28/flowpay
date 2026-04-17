@@ -10,8 +10,15 @@ so there's nothing to drain.
 
 **Target chain:** Base Sepolia (84532) — also runs unchanged on anvil and
 Base mainnet.
-**Coverage:** regenerate with `forge coverage`; numbers are not pinned in
-this doc to keep them honest.
+
+**Coverage (`forge coverage --report summary`, last run):**
+
+| File                  | Lines | Statements | Branches | Functions |
+|-----------------------|-------|------------|----------|-----------|
+| `PaymentRouter.sol`   | 18/18 | 19/19      | 3/3      | 5/5       |
+
+100% across the board. Regenerate before re-quoting; CI re-runs this on
+every push.
 
 ---
 
@@ -130,7 +137,7 @@ forge snapshot
 ```
 
 `PaymentRouterTest` covers the happy path, all reverts, the emitted event,
-nonce replay, and pause behavior — 9 tests at last run.
+nonce replay, and pause/unpause behavior — 10 tests at last run.
 
 ---
 

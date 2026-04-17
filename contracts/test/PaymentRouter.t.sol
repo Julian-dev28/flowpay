@@ -1,40 +1,42 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
-import {Test, console2} from "forge-std/Test.sol";
+import {Test} from "forge-std/Test.sol";
 import {PaymentRouter} from "../src/PaymentRouter.sol";
+import {IPaymentRouter} from "../src/interfaces/IPaymentRouter.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
 
 contract PaymentRouterTest is Test {
     PaymentRouter public router;
     MockUSDC public usdc;
+    address public payer;
+    uint256 public payerPk;
     address public merchant;
-    uint256 public merchantPk;
 
     bytes32 public constant PAYMENT_ORDER_TYPEHASH = keccak256(
-        "PaymentOrder(address merchant,address token,uint256 amount,uint256 nonce,uint256 deadline)"
+        "PaymentOrder(address payer,address merchant,address token,uint256 amount,uint256 nonce,uint256 deadline)"
     );
 
     function setUp() public {
-        (merchant, merchantPk) = makeAddrAndKey("merchant");
+        (payer, payerPk) = makeAddrAndKey("payer");
+        merchant = makeAddr("merchant");
         router = new PaymentRouter();
         usdc = new MockUSDC();
 
-        // Mint USDC to merchant and approve router
-        usdc.mint(merchant, 1000e6);
-        vm.prank(merchant);
+        usdc.mint(payer, 1000e6);
+        vm.prank(payer);
         usdc.approve(address(router), type(uint256).max);
     }
 
-    function test_SettleWithValidSignature() public {
-        uint256 amount = 100e6;
-        uint256 nonce = 0;
-        uint256 deadline = block.timestamp + 1 hours;
-
-        bytes32 domainSeparator = router.DOMAIN_SEPARATOR();
+    function _sign(uint256 amount, uint256 nonce, uint256 deadline)
+        internal
+        view
+        returns (bytes memory)
+    {
         bytes32 structHash = keccak256(
             abi.encode(
                 PAYMENT_ORDER_TYPEHASH,
+                payer,
                 merchant,
                 address(usdc),
                 amount,
@@ -42,64 +44,90 @@ contract PaymentRouterTest is Test {
                 deadline
             )
         );
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(merchantPk, digest);
-        bytes memory signature = abi.encodePacked(r, s, v);
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", router.DOMAIN_SEPARATOR(), structHash));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerPk, digest);
+        return abi.encodePacked(r, s, v);
+    }
 
-        // Should succeed without revert
-        router.settle(merchant, address(usdc), amount, nonce, deadline, signature);
+    function test_SettleTransfersTokensToMerchant() public {
+        uint256 amount = 100e6;
+        bytes memory sig = _sign(amount, 0, block.timestamp + 1 hours);
 
-        // Verify nonce is marked as used
-        assertTrue(router.usedNonces(merchant, nonce));
+        uint256 payerBefore = usdc.balanceOf(payer);
+        uint256 merchantBefore = usdc.balanceOf(merchant);
+        uint256 routerBefore = usdc.balanceOf(address(router));
+
+        router.settle(payer, merchant, address(usdc), amount, 0, block.timestamp + 1 hours, sig);
+
+        assertEq(usdc.balanceOf(payer), payerBefore - amount, "payer debited");
+        assertEq(usdc.balanceOf(merchant), merchantBefore + amount, "merchant credited");
+        assertEq(usdc.balanceOf(address(router)), routerBefore, "router holds no funds");
+        assertTrue(router.usedNonces(payer, 0));
+    }
+
+    function test_SettleEmitsSettled() public {
+        uint256 amount = 50e6;
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory sig = _sign(amount, 7, deadline);
+
+        // Don't constrain orderHash — just check the other indexed fields and data.
+        vm.expectEmit(false, true, true, true, address(router));
+        emit IPaymentRouter.Settled(bytes32(0), payer, merchant, address(usdc), amount, 7);
+        router.settle(payer, merchant, address(usdc), amount, 7, deadline, sig);
     }
 
     function test_RevertWhen_SignatureExpired() public {
         uint256 amount = 100e6;
-        uint256 nonce = 0;
         uint256 deadline = block.timestamp - 1;
+        bytes memory sig = _sign(amount, 0, deadline);
 
-        bytes32 domainSeparator = router.DOMAIN_SEPARATOR();
-        bytes32 structHash = keccak256(
-            abi.encode(
-                PAYMENT_ORDER_TYPEHASH,
-                merchant,
-                address(usdc),
-                amount,
-                nonce,
-                deadline
-            )
-        );
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(merchantPk, digest);
-        bytes memory signature = abi.encodePacked(r, s, v);
-
-        vm.expectRevert(PaymentRouter.SignatureExpired.selector);
-        router.settle(merchant, address(usdc), amount, nonce, deadline, signature);
+        vm.expectRevert(IPaymentRouter.SignatureExpired.selector);
+        router.settle(payer, merchant, address(usdc), amount, 0, deadline, sig);
     }
 
     function test_RevertWhen_InvalidSignature() public {
         uint256 amount = 100e6;
-        uint256 nonce = 0;
         uint256 deadline = block.timestamp + 1 hours;
-        uint256 wrongPk = 0x456;
+        bytes memory sig = _sign(amount, 0, deadline);
 
-        bytes32 domainSeparator = router.DOMAIN_SEPARATOR();
+        // Tamper: pass a different amount than what was signed
+        vm.expectRevert(IPaymentRouter.InvalidSignature.selector);
+        router.settle(payer, merchant, address(usdc), amount + 1, 0, deadline, sig);
+    }
+
+    function test_RevertWhen_WrongSignerSignedOrder() public {
+        (, uint256 attackerPk) = makeAddrAndKey("attacker");
+        uint256 amount = 100e6;
+        uint256 deadline = block.timestamp + 1 hours;
+
         bytes32 structHash = keccak256(
             abi.encode(
                 PAYMENT_ORDER_TYPEHASH,
+                payer,
                 merchant,
                 address(usdc),
                 amount,
-                nonce,
+                0,
                 deadline
             )
         );
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(wrongPk, digest);
-        bytes memory signature = abi.encodePacked(r, s, v);
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", router.DOMAIN_SEPARATOR(), structHash));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(attackerPk, digest);
+        bytes memory sig = abi.encodePacked(r, s, v);
 
-        vm.expectRevert(PaymentRouter.InvalidSignature.selector);
-        router.settle(merchant, address(usdc), amount, nonce, deadline, signature);
+        vm.expectRevert(IPaymentRouter.InvalidSignature.selector);
+        router.settle(payer, merchant, address(usdc), amount, 0, deadline, sig);
+    }
+
+    function test_RevertWhen_NonceReplayed() public {
+        uint256 amount = 100e6;
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory sig = _sign(amount, 0, deadline);
+
+        router.settle(payer, merchant, address(usdc), amount, 0, deadline, sig);
+
+        vm.expectRevert(IPaymentRouter.AlreadyUsedNonce.selector);
+        router.settle(payer, merchant, address(usdc), amount, 0, deadline, sig);
     }
 
     function test_PauseByPauser() public {
@@ -111,5 +139,17 @@ contract PaymentRouterTest is Test {
     function test_RevertWhen_NonPauserTriesPause() public {
         vm.expectRevert();
         router.pause();
+    }
+
+    function test_RevertWhen_PausedSettleCalled() public {
+        router.grantRole(router.PAUSER_ROLE(), address(this));
+        router.pause();
+
+        uint256 amount = 100e6;
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory sig = _sign(amount, 0, deadline);
+
+        vm.expectRevert(); // Pausable: paused — uses custom error from OZ v5
+        router.settle(payer, merchant, address(usdc), amount, 0, deadline, sig);
     }
 }

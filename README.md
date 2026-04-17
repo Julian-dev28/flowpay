@@ -2,7 +2,7 @@
 
 EIP-712 signed crypto-payment orchestration on Base. Monorepo: Solidity contracts, a Fastify orchestrator, a BullMQ tx-submitter worker, an event indexer, and a Next.js frontend.
 
-> Status: scaffold + happy path. PaymentRouter ships with 7 passing forge tests and ~90% line coverage. Frontend connects a wallet via wagmi. Backend services build and start, but end-to-end flow has not been exercised against a live RPC. See QA_REPORT.md for a candid bug list.
+> Status: scaffold + happy path. PaymentRouter ships with 9 passing forge tests. Frontend connects a wallet via wagmi. Backend services boot cleanly and run end-to-end against a local anvil (see `docs/DEMO.md`). See QA_REPORT.md for the candid bug list and how it has been worked down.
 
 ## Architecture
 
@@ -81,11 +81,12 @@ See `docs/API.md` for request shapes.
 
 `PaymentRouter.sol` (Solidity 0.8.26):
 
-- EIP-712 signed `PaymentOrder` (`merchant, token, amount, nonce, deadline`)
+- EIP-712 signed `PaymentOrder` (`payer, merchant, token, amount, nonce, deadline`)
 - `AccessControl` (`PAUSER_ROLE`) + `Pausable`
-- Per-`(merchant, nonce)` replay protection via `usedNonces` mapping
+- Per-`(payer, nonce)` replay protection via `usedNonces` mapping
 - `ReentrancyGuard` on `settle()`
-- Pulls tokens via standard `IERC20.transferFrom` (router holds tokens — no merchant payout step yet; see QA_REPORT.md M1/M2)
+- `SafeERC20.safeTransferFrom(payer, merchant, amount)` — router never holds funds
+- Any relayer can submit the signed order; the payer's pre-approval (`IERC20.approve(router, …)`) authorizes the pull
 
 Coverage figures live in `forge coverage` output; regenerate before quoting them.
 
@@ -98,13 +99,11 @@ Coverage figures live in `forge coverage` output; regenerate before quoting them
 
 ## Known gaps
 
-See `QA_REPORT.md` for the full critical/high/medium bug list. The biggest items:
+See `QA_REPORT.md` for the bug list, marked with the commits that closed each item. Open work:
 
-- `settle()` pulls tokens to the router and never forwards to a merchant address
-- No `payer` field — the merchant signs to receive their own tokens
-- tx-submitter has no nonce management for the EOA
-- `pnpm dev` and `pnpm -r test` are not yet wired
-- Frontend root layout has no `metadata` export (`<title>` shows the URL)
+- tx-submitter serializes via `concurrency: 1` rather than a proper local-nonce mutex — fine for v0 throughput, would need to change before production load
+- `pnpm dev` (turbo run dev) still isn't a clean four-pane launch; per-service `pnpm -F … dev` works and is what `docs/DEMO.md` uses
+- No persistence: indexer keeps Settled events in memory only, orchestrator's PaymentIntent state never escapes BullMQ
 
 ## License
 

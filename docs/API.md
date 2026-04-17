@@ -72,14 +72,17 @@ Submit a signed payment intent. Enqueues to `payment.submit` BullMQ queue.
 **Request Body:**
 ```json
 {
+  "payer": "0x...",
   "merchant": "0x...",
   "token": "0x...",
   "amount": "100000000",
-  "nonce": 0,
-  "deadline": 9999999999,
+  "nonce": "0",
+  "deadline": "9999999999",
   "signature": "0x..."
 }
 ```
+
+All numeric fields are decimal strings (uint256s don't fit in JSON numbers).
 
 **Response (202 Accepted):**
 ```json
@@ -107,11 +110,12 @@ Submit a signed payment intent. Enqueues to `payment.submit` BullMQ queue.
 ```json
 {
   "paymentId": "uuid...",
+  "payer": "0x...",
   "merchant": "0x...",
   "token": "0x...",
   "amount": "100000000",
-  "nonce": 0,
-  "deadline": 9999999999,
+  "nonce": "0",
+  "deadline": "9999999999",
   "signature": "0x..."
 }
 ```
@@ -127,5 +131,5 @@ Submit a signed payment intent. Enqueues to `payment.submit` BullMQ queue.
 The tx-submitter worker processes `payment.submit` jobs by calling `PaymentRouter.settle()` on-chain.
 
 **Contract:** `PaymentRouter.sol` (Base Sepolia)
-**Function:** `settle(address merchant, address token, uint256 amount, uint256 nonce, uint256 deadline, bytes signature)`
-**Event:** `Settled(bytes32 orderHash, address merchant, address token, uint256 amount, uint256 nonce)`
+**Function:** `settle(address payer, address merchant, address token, uint256 amount, uint256 nonce, uint256 deadline, bytes signature)`
+**Event:** `Settled(bytes32 indexed orderHash, address indexed payer, address indexed merchant, address token, uint256 amount, uint256 nonce)`

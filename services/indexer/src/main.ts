@@ -7,9 +7,10 @@ const client = createPublicClient({
   transport: http(env.RPC_URL),
 });
 
-// In-memory store for Settled events (extend to DB later)
+// In-memory store for Settled events (extend to DB later).
 const settledEvents: Array<{
   orderHash: string;
+  payer: string;
   merchant: string;
   token: string;
   amount: string;
@@ -17,37 +18,36 @@ const settledEvents: Array<{
   timestamp: number;
 }> = [];
 
-// PaymentRouter ABI
+// Keep in sync with contracts/src/PaymentRouter.sol.
 const paymentRouterABI = parseAbi([
-  "event Settled(bytes32 indexed orderHash, address indexed merchant, address token, uint256 amount, uint256 nonce)",
+  "event Settled(bytes32 indexed orderHash, address indexed payer, address indexed merchant, address token, uint256 amount, uint256 nonce)",
 ]);
 
 console.log(`FlowPay indexer started — watching Base Sepolia (chainId ${env.CHAIN_ID})`);
 
-// Watch for Settled events
 const unwatch = client.watchContractEvent({
   address: env.PAYMENT_ROUTER_ADDRESS as `0x${string}`,
   abi: paymentRouterABI,
-  eventName: 'Settled',
+  eventName: "Settled",
   onLogs: (logs) => {
     for (const log of logs) {
       const event = {
         orderHash: log.args.orderHash as string,
+        payer: log.args.payer as string,
         merchant: log.args.merchant as string,
         token: log.args.token as string,
-        amount: log.args.amount?.toString() || "",
-        nonce: log.args.nonce?.toString() || "",
+        amount: log.args.amount?.toString() ?? "",
+        nonce: log.args.nonce?.toString() ?? "",
         timestamp: Date.now(),
       };
       settledEvents.push(event);
-      console.log('Settled event saved:', event);
+      console.log("Settled event saved:", event);
     }
   },
 });
 
 console.log(`Watching PaymentRouter at ${env.PAYMENT_ROUTER_ADDRESS}`);
 
-// Graceful shutdown
 process.on("SIGINT", () => {
   console.log("Indexer shutting down");
   unwatch();

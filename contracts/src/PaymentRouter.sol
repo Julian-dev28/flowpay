@@ -6,24 +6,28 @@ import {ECDSA} from "openzeppelin-contracts/utils/cryptography/ECDSA.sol";
 import {ReentrancyGuard} from "openzeppelin-contracts/utils/ReentrancyGuard.sol";
 import {AccessControl} from "openzeppelin-contracts/access/AccessControl.sol";
 import {Pausable} from "openzeppelin-contracts/utils/Pausable.sol";
-import {IERC20} from "openzeppelin-contracts/token/ERC20/IERC20.sol";
+import {SafeERC20, IERC20} from "openzeppelin-contracts/token/ERC20/utils/SafeERC20.sol";
+import {IPaymentRouter} from "./interfaces/IPaymentRouter.sol";
 
-contract PaymentRouter is EIP712, ReentrancyGuard, AccessControl, Pausable {
+/// @title PaymentRouter
+/// @notice EIP-712 signed payment intents. A payer pre-approves the router for
+///         their token, signs a PaymentOrder, and any relayer can call settle()
+///         to push the funds straight to the merchant. The router never holds
+///         funds, so there's nothing to drain.
+contract PaymentRouter is IPaymentRouter, EIP712, ReentrancyGuard, AccessControl, Pausable {
+    using SafeERC20 for IERC20;
+
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
     string private constant NAME = "PaymentRouter";
     string private constant VERSION = "1";
 
     bytes32 public constant PAYMENT_ORDER_TYPEHASH = keccak256(
-        "PaymentOrder(address merchant,address token,uint256 amount,uint256 nonce,uint256 deadline)"
+        "PaymentOrder(address payer,address merchant,address token,uint256 amount,uint256 nonce,uint256 deadline)"
     );
 
-    mapping(address => mapping(uint256 => bool)) public usedNonces;
-
-    event Settled(bytes32 indexed orderHash, address indexed merchant, address token, uint256 amount, uint256 nonce);
-
-    error InvalidSignature();
-    error SignatureExpired();
-    error AlreadyUsedNonce();
+    /// @dev Replay protection is scoped to the (payer, nonce) pair so different
+    ///      payers can pick the same nonce without colliding.
+    mapping(address payer => mapping(uint256 nonce => bool used)) public usedNonces;
 
     constructor() EIP712(NAME, VERSION) {
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
@@ -34,19 +38,21 @@ contract PaymentRouter is EIP712, ReentrancyGuard, AccessControl, Pausable {
     }
 
     function settle(
+        address payer,
         address merchant,
         address token,
         uint256 amount,
         uint256 nonce,
         uint256 deadline,
-        bytes memory signature
+        bytes calldata signature
     ) external whenNotPaused nonReentrant {
         if (block.timestamp > deadline) revert SignatureExpired();
-        if (usedNonces[merchant][nonce]) revert AlreadyUsedNonce();
+        if (usedNonces[payer][nonce]) revert AlreadyUsedNonce();
 
         bytes32 structHash = keccak256(
             abi.encode(
                 PAYMENT_ORDER_TYPEHASH,
+                payer,
                 merchant,
                 token,
                 amount,
@@ -54,17 +60,15 @@ contract PaymentRouter is EIP712, ReentrancyGuard, AccessControl, Pausable {
                 deadline
             )
         );
-        bytes32 hash = _hashTypedDataV4(structHash);
-        address recovered = ECDSA.recover(hash, signature);
+        bytes32 digest = _hashTypedDataV4(structHash);
+        address recovered = ECDSA.recover(digest, signature);
+        if (recovered != payer) revert InvalidSignature();
 
-        if (recovered != merchant) revert InvalidSignature();
+        usedNonces[payer][nonce] = true;
 
-        usedNonces[merchant][nonce] = true;
+        IERC20(token).safeTransferFrom(payer, merchant, amount);
 
-        // Pull tokens from merchant to this contract
-        IERC20(token).transferFrom(merchant, address(this), amount);
-
-        emit Settled(structHash, merchant, token, amount, nonce);
+        emit Settled(structHash, payer, merchant, token, amount, nonce);
     }
 
     function pause() external onlyRole(PAUSER_ROLE) {

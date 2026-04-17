@@ -1,19 +1,23 @@
 /**
- * EIP-712 domain separator for FlowPay PaymentRouter on Base Sepolia (chainId 84532).
- * The verifyingContract address is set at runtime from the deployed PaymentRouter.
+ * EIP-712 domain for FlowPay's PaymentRouter.
+ *
+ * Domain name + version are pinned by the on-chain contract constants
+ * (NAME = "PaymentRouter", VERSION = "1"). chainId and verifyingContract are
+ * supplied at runtime so the same builder works against anvil, Base Sepolia,
+ * and Base mainnet.
  */
 export interface EIP712Domain {
-  name: "FlowPay";
+  name: "PaymentRouter";
   version: "1";
-  chainId: 84532;
+  chainId: number;
   verifyingContract: string;
 }
 
-export function getDomain(verifyingContract: string): EIP712Domain {
+export function getDomain(chainId: number, verifyingContract: string): EIP712Domain {
   return {
-    name: "FlowPay",
+    name: "PaymentRouter",
     version: "1",
-    chainId: 84532,
+    chainId,
     verifyingContract,
   };
 }

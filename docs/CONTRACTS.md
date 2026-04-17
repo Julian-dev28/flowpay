@@ -1,31 +1,36 @@
-# FlowPay Contracts Documentation
+# FlowPay Contracts
 
 ## Overview
 
-`PaymentRouter.sol` — EIP-712 signed payment intents with `AccessControl`, `Pausable`, and per-`(merchant, nonce)` replay protection. Tokens are pulled via standard `IERC20.transferFrom` (the router holds them; no merchant payout step yet — see QA_REPORT.md).
+`PaymentRouter.sol` is an EIP-712 signed payment relayer. A **payer**
+pre-approves the router for the ERC-20 they want to spend, signs a
+`PaymentOrder` off-chain, and any relayer can call `settle()` to push the
+funds straight from the payer to the merchant. The router never holds funds,
+so there's nothing to drain.
 
-**Deployed on:** not yet (no deploy script committed). Designed for Base Sepolia (84532).
-**Coverage:** regenerate with `forge coverage` — do not quote stale figures.
+**Target chain:** Base Sepolia (84532) — also runs unchanged on anvil and
+Base mainnet.
+**Coverage:** regenerate with `forge coverage`; numbers are not pinned in
+this doc to keep them honest.
 
 ---
 
-## EIP-712 Signed Payments
+## EIP-712
 
-The router uses EIP-712 typed-data signing for gasless, signed payment intents.
-
-### Domain Separator
+### Domain
 
 ```
-name: "PaymentRouter"
-version: "1"
-chainId: 84532 (Base Sepolia)
-verifyingContract: <deployed_address>
+name              = "PaymentRouter"
+version           = "1"
+chainId           = <runtime>
+verifyingContract = <deployed address>
 ```
 
-### PaymentOrder Type
+### PaymentOrder
 
 ```solidity
 struct PaymentOrder {
+    address payer;
     address merchant;
     address token;
     uint256 amount;
@@ -35,101 +40,83 @@ struct PaymentOrder {
 ```
 
 Type hash:
+
 ```solidity
-keccak256("PaymentOrder(address merchant,address token,uint256 amount,uint256 nonce,uint256 deadline)")
+keccak256(
+  "PaymentOrder(address payer,address merchant,address token,uint256 amount,uint256 nonce,uint256 deadline)"
+)
 ```
 
-### Signing Flow
+The off-chain builder lives in `packages/eip712/src/payment-order.ts` and
+stays in lockstep with the Solidity struct.
 
-1. User signs `PaymentOrder` off-chain using EIP-712
-2. Signed intent is submitted to `/pay` endpoint
-3. Orchestrator enqueues to `payment.submit` queue
-4. Tx-submitter calls `settle()` with signature
+### Signing flow
+
+1. Payer calls `IERC20(token).approve(router, ≥ amount)` once.
+2. Payer signs a `PaymentOrder` with their wallet (EIP-712).
+3. The signed order is POSTed to the orchestrator's `/pay` endpoint.
+4. Orchestrator enqueues the job; tx-submitter calls `settle()` from a
+   relayer EOA — the payer pays no gas.
 
 ---
 
 ## Functions
 
-### `settle(address merchant, address token, uint256 amount, uint256 nonce, uint256 deadline, bytes signature)`
+### `settle(payer, merchant, token, amount, nonce, deadline, signature)`
 
-Process a signed payment intent.
+- Verifies `block.timestamp <= deadline` (`SignatureExpired`).
+- Verifies `usedNonces[payer][nonce] == false` (`AlreadyUsedNonce`).
+- Recovers the EIP-712 signer; must equal `payer` (`InvalidSignature`).
+- Marks the nonce used.
+- `SafeERC20.safeTransferFrom(payer, merchant, amount)`.
+- Emits `Settled`.
 
-- ✅ Verifies EIP-712 signature (must match `merchant`)
-- ✅ Checks `deadline` (reverts if expired)
-- ✅ Checks `nonce` (reverts on replay)
-- ✅ Pulls tokens via `IERC20.transferFrom()`
-- 📢 Emits `Settled` event
-
-**Reverts:**
-- `InvalidSignature()` — signature doesn't match merchant
-- `SignatureExpired()` — `block.timestamp > deadline`
-- `AlreadyUsedNonce()` — nonce already used
-
----
+Reentrancy-guarded; respects `whenNotPaused`.
 
 ### `pause()` / `unpause()`
 
-Pause or unpause the router. Restricted to `PAUSER_ROLE`.
-
-```solidity
-function pause() external onlyRole(PAUSER_ROLE);
-function unpause() external onlyRole(PAUSER_ROLE);
-```
+Restricted to `PAUSER_ROLE`. Stops every `settle()` call.
 
 ---
 
 ## Events
 
-### `Settled(bytes32 indexed orderHash, address indexed merchant, address token, uint256 amount, uint256 nonce)`
+```solidity
+event Settled(
+    bytes32 indexed orderHash,
+    address indexed payer,
+    address indexed merchant,
+    address token,
+    uint256 amount,
+    uint256 nonce
+);
+```
 
-Emitted when a payment is successfully settled.
-
-**Indexed:** `orderHash`, `merchant`  
-**Non-indexed:** `token`, `amount`, `nonce`
-
-The indexer watches this event via viem's `watchContractEvent`.
+The indexer watches this via `viem.watchContractEvent`.
 
 ---
 
 ## Roles
 
-| Role | Description | Grantor |
-|------|------------|---------|
-| `DEFAULT_ADMIN_ROLE` | Can grant/revoke roles | Deployer (on constructor) |
-| `PAUSER_ROLE` | Can pause/unpause | Admin |
+| Role                  | Capability               | Granted to                |
+|-----------------------|--------------------------|---------------------------|
+| `DEFAULT_ADMIN_ROLE`  | Grant/revoke roles       | Deployer (constructor)    |
+| `PAUSER_ROLE`         | Pause/unpause `settle()` | Admin (off-deploy)        |
 
 ---
 
-## Security
+## Security properties
 
-### ✅ Nonce Replay Protection
-
-Each `(merchant, nonce)` pair can only be used once:
-```solidity
-if (usedNonces[merchant][nonce]) revert AlreadyUsedNonce();
-```
-
-### ✅ Signature Expiry
-
-Payments must be submitted before `deadline`:
-```solidity
-if (block.timestamp > deadline) revert SignatureExpired();
-```
-
-### ✅ Signature Verification
-
-EIP-712 signature must recover to `merchant`:
-```solidity
-address recovered = ECDSA.recover(hash, signature);
-if (recovered != merchant) revert InvalidSignature();
-```
-
-### ✅ Pausable
-
-Router can be paused during emergencies:
-```solidity
-whenNotPaused  // on settle()
-```
+- **Nonce replay protection** — `(payer, nonce)` may only be used once.
+- **Deadline enforcement** — orders past `deadline` revert.
+- **Signature verification** — ECDSA recovery must equal `payer`; OZ's
+  `ECDSA.recover` rejects malleable signatures.
+- **No fund custody** — `safeTransferFrom(payer, merchant, amount)` moves
+  tokens directly; the router never holds balance.
+- **Pausable kill-switch** — `whenNotPaused` modifier on `settle()`.
+- **Reentrancy guard** — `nonReentrant` on `settle()` (defense in depth;
+  the contract makes only one external call and has no value-bearing
+  callbacks).
 
 ---
 
@@ -137,27 +124,25 @@ whenNotPaused  // on settle()
 
 ```bash
 cd contracts
-forge test -vv          # Run all tests
-forge coverage          # Coverage report
-forge snapshot          # Gas snapshot
+forge test -vv
+forge coverage
+forge snapshot
 ```
 
-**Test Suites:**
-- `PaymentRouterTest` — 5 tests (signature, expiry, pause)
-- `PaymentRouterReplayTest` — 1 test (nonce replay)
-- `PaymentRouterPermit2Test` — 1 test (token transfer; **misnomer** — does not use Permit2, see QA_REPORT.md C2)
-
-**Total:** 7 tests, all passing ✅
+`PaymentRouterTest` covers the happy path, all reverts, the emitted event,
+nonce replay, and pause behavior — 9 tests at last run.
 
 ---
 
 ## Deployment
 
 ```bash
-cd contracts
-forge create --rpc-url <RPC_URL> --private-key <KEY> src/PaymentRouter.sol
+forge create src/PaymentRouter.sol:PaymentRouter \
+  --rpc-url $RPC_URL \
+  --private-key $DEPLOYER_PRIVATE_KEY
 ```
 
-Update `PAYMENT_ROUTER_ADDRESS` in:
+After deploy, set `PAYMENT_ROUTER_ADDRESS` in:
+
 - `services/tx-submitter/.env`
 - `services/indexer/.env`

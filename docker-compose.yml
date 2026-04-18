@@ -1,4 +1,11 @@
-version: "3.8"
+# Local dev stack: redis + the three backend services.
+#
+# The frontend is not containerized — run it with `pnpm -F @flowpay/frontend dev`
+# alongside this stack. Anvil is also not in compose; see `docs/DEMO.md` for the
+# end-to-end demo path.
+#
+# .env files are optional. Every service has Zod defaults so a missing .env
+# starts the service in a sensible stub configuration (no on-chain calls).
 
 services:
   redis:
@@ -20,7 +27,10 @@ services:
     ports:
       - "3001:3001"
     env_file:
-      - services/orchestrator/.env
+      - path: services/orchestrator/.env
+        required: false
+    environment:
+      - REDIS_URL=redis://redis:6379
     depends_on:
       redis:
         condition: service_healthy
@@ -31,7 +41,11 @@ services:
       context: .
       dockerfile: services/tx-submitter/Dockerfile
     env_file:
-      - services/tx-submitter/.env
+      - path: services/tx-submitter/.env
+        required: false
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
     depends_on:
       redis:
         condition: service_healthy
@@ -42,7 +56,8 @@ services:
       context: .
       dockerfile: services/indexer/Dockerfile
     env_file:
-      - services/indexer/.env
+      - path: services/indexer/.env
+        required: false
     depends_on:
       redis:
         condition: service_healthy

@@ -1,9 +1,20 @@
-import { createPublicClient, http, parseAbi } from "viem";
+import { createPublicClient, http, parseAbi, defineChain, type Chain } from "viem";
 import { baseSepolia } from "viem/chains";
 import { env } from "./env";
 
+function resolveChain(chainId: number, rpcUrl: string): Chain {
+  if (chainId === baseSepolia.id) return baseSepolia;
+  return defineChain({
+    id: chainId,
+    name: `chain-${chainId}`,
+    nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+    rpcUrls: { default: { http: [rpcUrl] } },
+  });
+}
+
+const chain = resolveChain(env.CHAIN_ID, env.RPC_URL);
 const client = createPublicClient({
-  chain: baseSepolia,
+  chain,
   transport: http(env.RPC_URL),
 });
 
@@ -23,7 +34,7 @@ const paymentRouterABI = parseAbi([
   "event Settled(bytes32 indexed orderHash, address indexed payer, address indexed merchant, address token, uint256 amount, uint256 nonce)",
 ]);
 
-console.log(`FlowPay indexer started — watching Base Sepolia (chainId ${env.CHAIN_ID})`);
+console.log(`FlowPay indexer started — chain ${chain.name} (id ${chain.id}), rpc ${env.RPC_URL}`);
 
 const unwatch = client.watchContractEvent({
   address: env.PAYMENT_ROUTER_ADDRESS as `0x${string}`,

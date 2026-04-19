@@ -5,6 +5,7 @@ const envSchema = z.object({
   REDIS_HOST: z.string().default("localhost"),
   REDIS_PORT: z.string().default("6379"),
   CHAIN_RPC_URL: z.string().url().default("http://localhost:8545"),
+  CHAIN_ID: z.coerce.number().int().positive().default(84532), // Base Sepolia by default
   PAYMENT_ROUTER_ADDRESS: z
     .string()
     .regex(/^0x[a-fA-F0-9]{40}$/)

@@ -5,12 +5,28 @@ import {
   http,
   parseAbi,
   zeroAddress,
+  defineChain,
   type WalletClient,
   type Account,
+  type Chain,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia } from "viem/chains";
 import { logger } from "./logger";
+
+// Build a viem chain from CHAIN_ID so the worker can target anvil (31337) or
+// Base Sepolia (84532) without recompiling. Base Sepolia keeps its proper
+// metadata; everything else falls back to a generic local-style chain.
+function resolveChain(chainId: number, rpcUrl: string): Chain {
+  if (chainId === baseSepolia.id) return baseSepolia;
+  return defineChain({
+    id: chainId,
+    name: `chain-${chainId}`,
+    nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+    rpcUrls: { default: { http: [rpcUrl] } },
+  });
+}
+const chain = resolveChain(env.CHAIN_ID, env.CHAIN_RPC_URL);
 
 const connection = {
   host: env.REDIS_HOST,
@@ -35,7 +51,7 @@ if (env.PRIVATE_KEY) {
   const account: Account = privateKeyToAccount(env.PRIVATE_KEY as `0x${string}`);
   walletClient = createWalletClient({
     account,
-    chain: baseSepolia,
+    chain,
     transport: http(env.CHAIN_RPC_URL),
   });
   walletAddress = account.address;
@@ -68,7 +84,7 @@ const worker = new Worker(
     try {
       const hash = await walletClient.writeContract({
         account: walletClient.account!,
-        chain: baseSepolia,
+        chain,
         address: env.PAYMENT_ROUTER_ADDRESS as `0x${string}`,
         abi: paymentRouterABI,
         functionName: "settle",

@@ -1,6 +1,8 @@
 {
   "extends": "@flowpay/tsconfig/base.json",
   "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
     "noEmit": false,
     "types": ["node"]
   },

@@ -6,7 +6,9 @@
     "dev": "turbo run dev",
     "build": "turbo run build",
     "test": "turbo run test",
-    "lint": "turbo run lint"
+    "lint": "turbo run lint",
+    "stack": "bash scripts/dev-stack.sh",
+    "demo": "pnpm -F @flowpay/scripts demo"
   },
   "devDependencies": {
     "turbo": "2.3.3"

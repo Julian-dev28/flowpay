@@ -5,6 +5,25 @@ This runs the whole pipeline locally against `anvil`. A signed
 on-chain `settle()` call that moves Mock USDC from the payer directly to
 the merchant, and the indexer picks the resulting `Settled` event up.
 
+## The one-command path
+
+```bash
+pnpm install
+pnpm stack                             # terminal 1 — anvil + deploy + 3 services
+pnpm -F @flowpay/frontend dev          # terminal 2 — UI on :3000
+# optional:
+pnpm demo                              # terminal 3 — fire one payment via the script
+```
+
+`pnpm stack` runs `scripts/dev-stack.sh`: it boots anvil, runs the deploy
+script, picks the deployed addresses out of the broadcast log, then starts
+the orchestrator (`:3001`), tx-submitter (relayer EOA = anvil #0), and
+indexer (`:3002`) with the right envs. Logs land in `.dev-logs/`. Ctrl-C
+tears everything down.
+
+The rest of this doc is the manual path, useful when you want to debug a
+single service in isolation.
+
 ## What you'll see
 
 ```

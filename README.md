@@ -1,81 +1,90 @@
 # FlowPay
 
-EIP-712 signed crypto-payment orchestration on Base. Monorepo: Solidity contracts, a Fastify orchestrator, a BullMQ tx-submitter worker, an event indexer, and a Next.js frontend.
+EIP-712 signed crypto-payment orchestration on Base. Payers sign a typed
+payment intent off-chain. A relayer settles it on-chain through
+`PaymentRouter.settle()`, which pushes funds directly from the payer to the
+merchant — the router never holds balance.
 
-> Status: scaffold + happy path. PaymentRouter ships with 10 passing forge tests (100% line/statement/branch/function coverage). Frontend connects a wallet via wagmi. Backend services boot cleanly and run end-to-end against a local anvil (see `docs/DEMO.md`). See QA_REPORT.md for the candid bug list and how it has been worked down.
+Monorepo: Solidity contracts, a Fastify orchestrator, a BullMQ tx-submitter
+worker, an event indexer with an HTTP API, and a Next.js / wagmi / RainbowKit
+frontend.
+
+> 10 forge tests, 100% coverage of `PaymentRouter.sol`. Runs end-to-end
+> locally with one command (see *Quick start* below).
 
 ## Architecture
 
 ```
 flowpay/
-├── contracts/            # Foundry project (PaymentRouter.sol, EIP-712, AccessControl, Pausable)
+├── contracts/            # Foundry project (PaymentRouter.sol, EIP-712, AccessControl, Pausable, SafeERC20)
 ├── services/
-│   ├── orchestrator/     # Fastify HTTP API — accepts signed payment intents, enqueues to Redis
-│   ├── tx-submitter/     # BullMQ worker — pulls jobs, signs/sends settle() tx via viem
-│   └── indexer/          # viem event watcher — tails Settled events, keeps in-memory log
+│   ├── orchestrator/     # Fastify 5 — accepts signed payment intents, enqueues to BullMQ
+│   ├── tx-submitter/     # BullMQ 5 worker — pulls jobs, signs/sends settle() tx via viem
+│   └── indexer/          # viem watcher + Fastify HTTP — tails Settled events, exposes /events
 ├── apps/
-│   └── frontend/         # Next.js 15 App Router + wagmi 2 + viem 2 + TanStack Query
-└── packages/
-    ├── shared-types/     # Zod schemas (PaymentIntent, Quote)
-    ├── eip712/           # Typed-data builders
-    └── tsconfig/         # Shared TS config
+│   └── frontend/         # Next.js 15 App Router + wagmi 2 + RainbowKit 2 + viem 2 + TanStack Query
+├── packages/
+│   ├── shared-types/     # Zod schemas (PaymentIntent, Quote)
+│   ├── eip712/           # Typed-data builders
+│   └── tsconfig/         # Shared TS config
+└── scripts/              # demo.ts (one-shot end-to-end driver), dev-stack.sh (local stack)
 ```
 
 ## Prerequisites
 
 - Node 20+, pnpm 9
 - Foundry (`forge`, `anvil`, `cast`)
-- Redis (local or Docker)
+- Redis on `localhost:6379` (`brew services start redis` on macOS)
 
-## Setup
+## Quick start
 
 ```bash
 pnpm install
-pnpm -r build
 
-# Per-service env files
-cp services/orchestrator/.env.example services/orchestrator/.env
-cp services/tx-submitter/.env.example services/tx-submitter/.env
-cp services/indexer/.env.example services/indexer/.env
-cp apps/frontend/.env.example apps/frontend/.env
-# contracts/.env not yet checked in — create one with RPC_URL + DEPLOYER_PK if deploying
+# Terminal 1: anvil + contracts + orchestrator + tx-submitter + indexer
+pnpm stack
+
+# Terminal 2: frontend
+pnpm -F @flowpay/frontend dev    # http://localhost:3000
 ```
 
-## Running locally
+That's it. `pnpm stack` deploys `PaymentRouter` + `MockUSDC` to anvil, mints
+the demo payer 1,000,000 MockUSDC, and starts the three backend services
+with the right envs already wired. The frontend's defaults match the
+deterministic anvil addresses, so connecting any wallet to chain id 31337
+and clicking *Sign & pay* will land an on-chain `settle()` transaction.
 
-Root-level `pnpm dev` is not currently a reliable entry point — start each service in its own terminal:
+### Fire a payment without the UI
 
 ```bash
-redis-server --daemonize yes
-pnpm -F @flowpay/orchestrator dev   # http://localhost:3001
-pnpm -F @flowpay/tx-submitter dev   # BullMQ worker, no HTTP
-pnpm -F @flowpay/indexer dev        # event watcher, no HTTP
-pnpm -F @flowpay/frontend dev       # http://localhost:3000
+pnpm demo
 ```
 
-For an end-to-end run, also start an `anvil` fork or point `CHAIN_RPC_URL` at a Base Sepolia RPC and set `PAYMENT_ROUTER_ADDRESS` after deploy.
+Signs as anvil account #1, POSTs to the orchestrator's `/pay`, polls the
+merchant's balance, exits non-zero on timeout. See `docs/DEMO.md` for the
+walkthrough.
 
-## Testing
+## API surface
 
-```bash
-cd contracts && forge test -vv      # 7 tests
-cd contracts && forge coverage      # current PaymentRouter coverage
-cd contracts && forge snapshot      # gas
-```
+### Orchestrator (`:3001`)
 
-Service packages do not yet expose `test` scripts; `pnpm -r test` is a no-op today.
+| Method | Path                   | Purpose                                                      |
+|--------|------------------------|--------------------------------------------------------------|
+| GET    | `/healthz`             | liveness                                                     |
+| GET    | `/readyz`              | redis + queue deep check                                     |
+| GET    | `/metrics`             | Prometheus exposition (process + custom counters/histograms) |
+| GET    | `/quote`               | stub quote, 1:1 ratio — placeholder for 0x integration       |
+| GET    | `/payments/:jobId`     | BullMQ job state for a submitted payment                     |
+| POST   | `/pay`                 | accepts signed `PaymentOrder`, enqueues to `payment.submit`  |
 
-## API surface (orchestrator, :3001)
+### Indexer (`:3002`)
 
-| Method | Path        | Purpose                                                      |
-|--------|-------------|--------------------------------------------------------------|
-| GET    | `/healthz`  | liveness                                                     |
-| GET    | `/readyz`   | redis + queue deep check                                     |
-| GET    | `/metrics`  | Prometheus exposition (process + custom counters/histograms) |
-| GET    | `/quote`    | stub quote, 1:1 ratio — placeholder for 0x integration       |
-| POST   | `/pay`      | accepts signed `PaymentOrder`, enqueues to `payment.submit`  |
+| Method | Path                                  | Purpose                                       |
+|--------|---------------------------------------|-----------------------------------------------|
+| GET    | `/healthz`                            | chain id, block height, events buffered       |
+| GET    | `/events?limit=&payer=&merchant=`     | recent Settled events (in-memory ring buffer) |
 
-See `docs/API.md` for request shapes.
+See `docs/API.md` for request/response shapes.
 
 ## Contracts
 
@@ -86,24 +95,36 @@ See `docs/API.md` for request shapes.
 - Per-`(payer, nonce)` replay protection via `usedNonces` mapping
 - `ReentrancyGuard` on `settle()`
 - `SafeERC20.safeTransferFrom(payer, merchant, amount)` — router never holds funds
-- Any relayer can submit the signed order; the payer's pre-approval (`IERC20.approve(router, …)`) authorizes the pull
+- Any relayer can submit the signed order; the payer's pre-approval
+  (`IERC20.approve(router, …)`) authorizes the pull
 
-Coverage figures live in `forge coverage` output; regenerate before quoting them.
+## Testing
+
+```bash
+cd contracts && forge test -vv      # 10/10 passing
+cd contracts && forge coverage      # 100% lines/statements/branches/functions on PaymentRouter
+cd contracts && forge snapshot      # gas
+
+pnpm -r --filter "!@flowpay/contracts" build   # typecheck/build every TS package
+```
+
+CI re-runs all of the above on every push and PR.
 
 ## Tech stack
 
 - **Contracts:** Solidity 0.8.26, OpenZeppelin v5, Foundry, viaIR optimizer
 - **Backend:** Fastify 5, BullMQ 5, ioredis 5, pino, prom-client, viem 2
-- **Frontend:** Next.js 15, React 19, wagmi 2, viem 2, TanStack Query 5
-- **Tooling:** pnpm workspaces, Turborepo, TypeScript 5
+- **Frontend:** Next.js 15, React 19, wagmi 2, RainbowKit 2, viem 2, TanStack Query 5
+- **Tooling:** pnpm workspaces, Turborepo, TypeScript 5, GitHub Actions
 
-## Known gaps
+## Known limitations
 
-See `QA_REPORT.md` for the bug list, marked with the commits that closed each item. Open work:
-
-- tx-submitter serializes via `concurrency: 1` rather than a proper local-nonce mutex — fine for v0 throughput, would need to change before production load
-- `pnpm dev` (turbo run dev) still isn't a clean four-pane launch; per-service `pnpm -F … dev` works and is what `docs/DEMO.md` uses
-- No persistence: indexer keeps Settled events in memory only, orchestrator's PaymentIntent state never escapes BullMQ
+- tx-submitter serializes via `concurrency: 1` rather than a proper local-nonce
+  mutex — fine for a v0 throughput target, would need to change before any
+  real production load.
+- Indexer keeps Settled events in memory only; production swaps the
+  ring buffer for Postgres/Clickhouse.
+- Orchestrator's `/quote` is a 1:1 stub — placeholder for 0x Swap API v2.
 
 ## License
 

@@ -1,12 +1,11 @@
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
 import { Providers } from "@/components/providers";
-
-const inter = Inter({ subsets: ["latin"] });
+import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "FlowPay",
-  description: "EIP-712 signed crypto-payment orchestration on Base",
+  title: "FlowPay — EIP-712 signed crypto payments on Base",
+  description:
+    "Gasless signed payment intents. Payers sign, relayers settle, merchants get paid — without holding funds in the router.",
 };
 
 export default function RootLayout({
@@ -16,7 +15,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className={inter.className}>
+      <body>
         <Providers>{children}</Providers>
       </body>
     </html>

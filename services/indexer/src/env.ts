@@ -9,6 +9,10 @@ const envSchema = z.object({
     .string()
     .regex(/^0x[a-fA-F0-9]{40}$/)
     .default("0x0000000000000000000000000000000000000000"),
+  PORT: z.string().default("3002"),
+  HOST: z.string().default("0.0.0.0"),
+  CORS_ORIGINS: z.string().default("http://localhost:3000,http://127.0.0.1:3000"),
+  LOG_LEVEL: z.string().default("info"),
 });
 
 export const env = envSchema.parse(process.env);

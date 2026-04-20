@@ -1,4 +1,5 @@
 import Fastify from "fastify";
+import cors from "@fastify/cors";
 import { env } from "./env";
 import promClient from "prom-client";
 import { Queue } from "bullmq";
@@ -16,6 +17,18 @@ const app = Fastify({
   },
 });
 const logger = app.log;
+
+// CORS — allow browser-side dApps to call /pay, /quote, etc. Registered
+// before decorateRequest so the fastify type inference stays clean.
+const allowedOrigins = env.CORS_ORIGINS.split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+app.register(cors, {
+  origin: allowedOrigins.includes("*") ? true : allowedOrigins,
+  methods: ["GET", "POST", "OPTIONS"],
+  credentials: false,
+  maxAge: 86400,
+});
 
 // Strongly-typed request decorators so we don't reach for `as any` in hooks.
 app.decorateRequest("requestId", "");
@@ -142,6 +155,26 @@ app.get("/quote", async (request) => {
     to: "0x0000000000000000000000000000000000000002",
     data: "0x",
     value: "0",
+  };
+});
+
+// Payment job status — frontend polls this to drive its lifecycle UI.
+app.get<{ Params: { jobId: string } }>("/payments/:jobId", async (request, reply) => {
+  const job = await paymentQueue.getJob(request.params.jobId);
+  if (!job) {
+    return reply.code(404).send({ error: "job not found" });
+  }
+  const state = await job.getState();
+  return {
+    jobId: job.id,
+    paymentId: job.data?.paymentId,
+    state, // waiting | active | completed | failed | delayed | paused
+    attemptsMade: job.attemptsMade,
+    failedReason: job.failedReason,
+    returnvalue: job.returnvalue,
+    timestamp: job.timestamp,
+    processedOn: job.processedOn,
+    finishedOn: job.finishedOn,
   };
 });
 

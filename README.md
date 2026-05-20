@@ -1,5 +1,10 @@
 # FlowPay
 
+[![CI](https://github.com/Julian-dev28/flowpay/actions/workflows/ci.yml/badge.svg)](https://github.com/Julian-dev28/flowpay/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+[![Solidity 0.8.26](https://img.shields.io/badge/Solidity-0.8.26-363636.svg)](contracts/src/PaymentRouter.sol)
+[![Node 20+](https://img.shields.io/badge/Node-20%2B-339933.svg)](.nvmrc)
+
 EIP-712 signed crypto-payment orchestration on Base. Payers sign a typed
 payment intent off-chain. A relayer settles it on-chain through
 `PaymentRouter.settle()`, which pushes funds directly from the payer to the

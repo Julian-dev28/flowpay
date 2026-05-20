@@ -19,20 +19,85 @@ frontend.
 
 ## Architecture
 
+```mermaid
+flowchart LR
+    subgraph Browser["Browser · apps/frontend"]
+        UI["Next.js 15<br/>wagmi · RainbowKit"]
+        Wallet[("EOA wallet<br/>MetaMask, etc.")]
+    end
+
+    subgraph Backend["services/"]
+        Orch["orchestrator<br/>Fastify · :3001"]
+        Queue[("BullMQ<br/>Redis :6379")]
+        TxSub["tx-submitter<br/>BullMQ worker<br/>concurrency=1"]
+        Indexer["indexer<br/>Fastify · :3002<br/>viem watcher"]
+    end
+
+    subgraph Chain["EVM · anvil / Base"]
+        Router["PaymentRouter.sol<br/>EIP-712 · Pausable<br/>SafeERC20"]
+        Token[("ERC-20 token<br/>e.g. USDC")]
+    end
+
+    UI -->|"signTypedData(PaymentOrder)"| Wallet
+    Wallet -->|signature| UI
+    UI -->|"POST /pay"| Orch
+    UI -->|"GET /events"| Indexer
+    UI -->|"GET /payments/:id"| Orch
+    UI -.->|"POST /faucet (dev)"| Orch
+
+    Orch -->|enqueue| Queue
+    Queue -->|consume| TxSub
+    TxSub -->|"settle(payer, merchant, …)"| Router
+    Router -->|"safeTransferFrom(payer → merchant)"| Token
+    Router -.->|"emit Settled"| Indexer
+```
+
+### Payment lifecycle
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant W as Wallet
+    participant F as Frontend
+    participant O as Orchestrator
+    participant Q as BullMQ
+    participant T as tx-submitter
+    participant C as PaymentRouter
+    participant I as Indexer
+
+    U->>F: pick merchant + amount
+    F->>W: signTypedData(PaymentOrder)
+    W-->>F: 65-byte signature
+    F->>O: POST /pay { payer, merchant, token, amount, nonce, deadline, sig }
+    O->>Q: enqueue payment.submit
+    O-->>F: 202 { jobId, paymentId }
+    Q-->>T: deliver job
+    T->>C: settle(...)
+    Note over C: verify EIP-712, check nonce<br/>+ deadline, mark used
+    C->>C: SafeERC20.safeTransferFrom(payer → merchant)
+    C-->>I: Settled(orderHash, payer, merchant, …)
+    F->>I: GET /events (poll)
+    I-->>F: includes matching orderHash
+    F-->>U: lifecycle stepper → "settled"
+```
+
+### Repo layout
+
 ```
 flowpay/
-├── contracts/            # Foundry project (PaymentRouter.sol, EIP-712, AccessControl, Pausable, SafeERC20)
+├── contracts/            # Foundry — PaymentRouter.sol (EIP-712, AccessControl, Pausable, SafeERC20)
 ├── services/
-│   ├── orchestrator/     # Fastify 5 — accepts signed payment intents, enqueues to BullMQ
-│   ├── tx-submitter/     # BullMQ 5 worker — pulls jobs, signs/sends settle() tx via viem
-│   └── indexer/          # viem watcher + Fastify HTTP — tails Settled events, exposes /events
+│   ├── orchestrator/     # Fastify 5 — /pay /quote /payments /faucet /metrics
+│   ├── tx-submitter/     # BullMQ 5 worker — pulls jobs, calls settle() via viem
+│   └── indexer/          # viem watchContractEvent + Fastify HTTP (/events)
 ├── apps/
-│   └── frontend/         # Next.js 15 App Router + wagmi 2 + RainbowKit 2 + viem 2 + TanStack Query
+│   └── frontend/         # Next.js 15 App Router + wagmi 2 + RainbowKit 2 + viem 2
 ├── packages/
 │   ├── shared-types/     # Zod schemas (PaymentIntent, Quote)
-│   ├── eip712/           # Typed-data builders
+│   ├── eip712/           # Typed-data builders (kept in lockstep with Solidity)
 │   └── tsconfig/         # Shared TS config
-└── scripts/              # demo.ts (one-shot end-to-end driver), dev-stack.sh (local stack)
+└── scripts/              # demo.ts (one-shot driver) · dev-stack.sh (local stack)
 ```
 
 ## Prerequisites

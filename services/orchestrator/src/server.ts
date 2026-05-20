@@ -4,8 +4,20 @@ import { env } from "./env";
 import promClient from "prom-client";
 import { Queue } from "bullmq";
 import IORedis from "ioredis";
-import { PayRequestSchema, QuoteRequestSchema } from "./schemas";
+import { PayRequestSchema, QuoteRequestSchema, FaucetRequestSchema } from "./schemas";
 import { randomUUID } from "crypto";
+import {
+  createWalletClient,
+  createPublicClient,
+  http,
+  parseAbi,
+  parseEther,
+  parseUnits,
+  defineChain,
+  type Address,
+  type Hex,
+} from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 // types/fastify.d.ts augments FastifyRequest with `requestId` and `startTime`
 
 const app = Fastify({
@@ -156,6 +168,126 @@ app.get("/quote", async (request) => {
     data: "0x",
     value: "0",
   };
+});
+
+// ── Faucet (dev only) ────────────────────────────────────────────────────
+// POST /faucet { address } → sends ETH + mints MockUSDC to that address on
+// the configured chain. Enabled only when FAUCET_ENABLED=true and a private
+// key + token address are configured. Production replaces this with off-chain
+// KYC / merchant onboarding flows; here it makes the live demo self-serve.
+const faucetEnabled =
+  env.FAUCET_ENABLED === "true" &&
+  !!env.FAUCET_PRIVATE_KEY &&
+  !!env.FAUCET_TOKEN_ADDRESS;
+
+let faucetState: {
+  walletClient: ReturnType<typeof createWalletClient>;
+  publicClient: ReturnType<typeof createPublicClient>;
+  account: Address;
+  token: Address;
+} | null = null;
+
+if (faucetEnabled) {
+  const chain = defineChain({
+    id: env.FAUCET_CHAIN_ID,
+    name: `chain-${env.FAUCET_CHAIN_ID}`,
+    nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+    rpcUrls: { default: { http: [env.FAUCET_RPC_URL] } },
+  });
+  const account = privateKeyToAccount(env.FAUCET_PRIVATE_KEY as Hex);
+  faucetState = {
+    walletClient: createWalletClient({ account, chain, transport: http(env.FAUCET_RPC_URL) }),
+    publicClient: createPublicClient({ chain, transport: http(env.FAUCET_RPC_URL) }),
+    account: account.address,
+    token: env.FAUCET_TOKEN_ADDRESS as Address,
+  };
+  logger.info(
+    { faucet: faucetState.account, token: faucetState.token, chainId: chain.id },
+    "faucet ready"
+  );
+}
+
+// Per-address cooldown so a single client can't drain the relayer on anvil.
+const FAUCET_COOLDOWN_MS = 10_000;
+const lastFaucetAt = new Map<string, number>();
+
+const MOCK_USDC_ABI = parseAbi([
+  "function mint(address to, uint256 amount) external",
+  "function decimals() view returns (uint8)",
+]);
+
+app.get("/faucet", async () => {
+  if (!faucetEnabled || !faucetState) {
+    return { enabled: false };
+  }
+  return {
+    enabled: true,
+    token: faucetState.token,
+    chainId: env.FAUCET_CHAIN_ID,
+    ethDrop: env.FAUCET_ETH_DROP,
+    tokenDrop: env.FAUCET_TOKEN_DROP,
+  };
+});
+
+app.post("/faucet", async (request, reply) => {
+  if (!faucetEnabled || !faucetState) {
+    return reply.code(404).send({ error: "faucet disabled" });
+  }
+  const parseResult = FaucetRequestSchema.safeParse(request.body);
+  if (!parseResult.success) {
+    return reply.code(400).send({ error: "invalid request", details: parseResult.error.issues });
+  }
+  const to = parseResult.data.address as Address;
+
+  const now = Date.now();
+  const last = lastFaucetAt.get(to.toLowerCase()) ?? 0;
+  if (now - last < FAUCET_COOLDOWN_MS) {
+    return reply.code(429).send({
+      error: "rate limited",
+      retryAfterMs: FAUCET_COOLDOWN_MS - (now - last),
+    });
+  }
+  lastFaucetAt.set(to.toLowerCase(), now);
+
+  try {
+    const decimals = await faucetState.publicClient.readContract({
+      address: faucetState.token,
+      abi: MOCK_USDC_ABI,
+      functionName: "decimals",
+    });
+    const tokenAmount = parseUnits(env.FAUCET_TOKEN_DROP, decimals as number);
+    const ethAmount = parseEther(env.FAUCET_ETH_DROP);
+
+    const ethTxHash = await faucetState.walletClient.sendTransaction({
+      account: faucetState.walletClient.account!,
+      chain: faucetState.walletClient.chain,
+      to,
+      value: ethAmount,
+    });
+    const mintTxHash = await faucetState.walletClient.writeContract({
+      account: faucetState.walletClient.account!,
+      chain: faucetState.walletClient.chain,
+      address: faucetState.token,
+      abi: MOCK_USDC_ABI,
+      functionName: "mint",
+      args: [to, tokenAmount],
+    });
+
+    logger.info({ to, ethTxHash, mintTxHash }, "faucet dispensed");
+    return {
+      to,
+      ethDrop: env.FAUCET_ETH_DROP,
+      tokenDrop: env.FAUCET_TOKEN_DROP,
+      token: faucetState.token,
+      ethTxHash,
+      mintTxHash,
+    };
+  } catch (err) {
+    logger.error({ err, to }, "faucet failed");
+    return reply.code(500).send({
+      error: err instanceof Error ? err.message : "faucet failed",
+    });
+  }
 });
 
 // Payment job status — frontend polls this to drive its lifecycle UI.

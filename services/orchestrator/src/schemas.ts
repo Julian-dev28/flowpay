@@ -24,3 +24,8 @@ export const QuoteRequestSchema = z.object({
 });
 
 export type QuoteRequest = z.infer<typeof QuoteRequestSchema>;
+
+export const FaucetRequestSchema = z.object({
+  address: Address,
+});
+export type FaucetRequest = z.infer<typeof FaucetRequestSchema>;

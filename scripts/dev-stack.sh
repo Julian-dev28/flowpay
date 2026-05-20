@@ -105,6 +105,13 @@ echo "▶ starting orchestrator on :$ORCH_PORT…"
     PORT="$ORCH_PORT" \
     LOG_LEVEL=info \
     CORS_ORIGINS="http://localhost:3000,http://127.0.0.1:3000" \
+    FAUCET_ENABLED=true \
+    FAUCET_RPC_URL="http://localhost:$ANVIL_PORT" \
+    FAUCET_CHAIN_ID=31337 \
+    FAUCET_PRIVATE_KEY="$RELAYER_PK" \
+    FAUCET_TOKEN_ADDRESS="$USDC" \
+    FAUCET_ETH_DROP=0.5 \
+    FAUCET_TOKEN_DROP=1000 \
     npx tsx src/server.ts > "$LOG_DIR/orchestrator.log" 2>&1 ) &
 PIDS+=($!)
 

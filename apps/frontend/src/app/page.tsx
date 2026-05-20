@@ -27,6 +27,13 @@ const SUPPORTED: Record<number, { name: string; explorer?: string }> = {
   [base.id]: { name: "Base", explorer: "https://basescan.org" },
 };
 
+// The PaymentRouter in the demo defaults is deterministic-anvil-only, so the
+// signing chainId must match anvil's chainId (31337). Signing against any
+// other chain produces an EIP-712 domain separator mismatch and the contract
+// reverts with InvalidSignature() — that's the InvalidSignature error you'll
+// see in the wallet/relayer if you skip this guard.
+const TARGET_CHAIN_ID = foundry.id;
+
 // Anvil demo defaults from `forge script DeployDemo.s.sol` (deterministic on
 // a fresh anvil). Overridable via the form.
 const DEFAULTS = {
@@ -125,7 +132,9 @@ export default function Home() {
   const publicClient = usePublicClient();
 
   const knownChain = SUPPORTED[chainId];
-  const wrongNetwork = isConnected && !knownChain;
+  // For the demo, the router only exists on anvil. Any other chain ID means
+  // signing will produce an InvalidSignature when settle() runs.
+  const wrongNetwork = isConnected && chainId !== TARGET_CHAIN_ID;
 
   const [merchant, setMerchant] = useState<string>(DEFAULTS.merchant);
   const [token, setToken] = useState<string>(DEFAULTS.token);
@@ -137,6 +146,8 @@ export default function Home() {
   const [events, setEvents] = useState<SettledEvent[]>([]);
   const [orchestratorOnline, setOrchestratorOnline] = useState<boolean | null>(null);
   const [indexerOnline, setIndexerOnline] = useState<boolean | null>(null);
+  const [faucet, setFaucet] = useState<{ enabled: boolean; ethDrop?: string; tokenDrop?: string } | null>(null);
+  const [faucetBusy, setFaucetBusy] = useState(false);
 
   const { data: blockNumber } = useBlockNumber({
     watch: !wrongNetwork && isConnected,
@@ -223,6 +234,15 @@ export default function Home() {
       } catch {
         if (!cancelled) setIndexerOnline(false);
       }
+      try {
+        const res = await fetch(`${ORCHESTRATOR_URL}/faucet`, { cache: "no-store" });
+        if (res.ok && !cancelled) {
+          const j = await res.json();
+          setFaucet(j);
+        }
+      } catch {
+        /* faucet may be disabled — fine */
+      }
     }
     probe();
     const t = setInterval(probe, 8000);
@@ -231,6 +251,32 @@ export default function Home() {
       clearInterval(t);
     };
   }, []);
+
+  async function handleFaucet() {
+    if (!address) return;
+    setFaucetBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(`${ORCHESTRATOR_URL}/faucet`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ address }),
+      });
+      const j = await res.json();
+      if (!res.ok) {
+        setError(`faucet: ${j.error ?? res.status}`);
+      } else {
+        // poll until the new balance shows up — refetch immediately and then
+        // a couple more times to ride out the next block.
+        setTimeout(() => refetchPayer(), 800);
+        setTimeout(() => refetchPayer(), 2400);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setFaucetBusy(false);
+    }
+  }
 
   // ── activity feed polling ────────────────────────────────────────────────
   const loadEvents = useCallback(async () => {
@@ -454,15 +500,17 @@ export default function Home() {
           <div className="result error" style={{ marginBottom: 18 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
               <span>
-                Unsupported network (chain id {chainId}). Switch to Base, Base Sepolia, or anvil.
+                This demo runs on local anvil (chain id {TARGET_CHAIN_ID}).
+                Your wallet is on chain {chainId} — signatures from any other
+                chain will be rejected by the router as <span className="mono">InvalidSignature</span>.
               </span>
               <button
                 className="btn ghost"
                 disabled={isSwitching}
-                onClick={() => switchChain({ chainId: baseSepolia.id })}
-                style={{ padding: "6px 12px" }}
+                onClick={() => switchChain({ chainId: TARGET_CHAIN_ID })}
+                style={{ padding: "6px 12px", whiteSpace: "nowrap" }}
               >
-                {isSwitching ? "Switching…" : "Switch to Base Sepolia"}
+                {isSwitching ? "Switching…" : "Switch to Anvil"}
               </button>
             </div>
           </div>
@@ -499,6 +547,23 @@ export default function Home() {
                 )}
               </span>
             )}
+            {/* On the anvil demo we expose a faucet so any connected wallet
+                can self-fund without importing the demo payer's private key. */}
+            {address &&
+              !wrongNetwork &&
+              faucet?.enabled &&
+              insufficientBalance && (
+                <button
+                  className="btn ghost"
+                  onClick={handleFaucet}
+                  disabled={faucetBusy}
+                  style={{ marginTop: 8, alignSelf: "flex-start", padding: "6px 12px", fontSize: 12 }}
+                >
+                  {faucetBusy
+                    ? "Funding…"
+                    : `Fund my wallet (${faucet.tokenDrop} ${symbol} + ${faucet.ethDrop} ETH)`}
+                </button>
+              )}
           </div>
 
           <div className="field">

@@ -75,6 +75,44 @@ Signs as anvil account #1, POSTs to the orchestrator's `/pay`, polls the
 merchant's balance, exits non-zero on timeout. See `docs/DEMO.md` for the
 walkthrough.
 
+### Fund any wallet on anvil
+
+Anvil state lives in memory, so every fresh `pnpm stack` wipes balances.
+The orchestrator exposes a permissionless faucet for the demo:
+
+```bash
+# 1000 MockUSDC + 0.5 ETH to any address
+curl -sX POST http://localhost:3001/faucet \
+  -H "Content-Type: application/json" \
+  -d '{"address":"0xYOUR_WALLET_ADDRESS"}' | jq
+
+# inspect the live drop amounts + token address
+curl -s http://localhost:3001/faucet | jq
+```
+
+In the UI: connect your wallet, switch to Anvil, click *Fund my wallet*
+under the Payer field (only shows when your balance is below the amount).
+
+Cooldown is 10s per address. Disable in non-dev by leaving
+`FAUCET_ENABLED` unset.
+
+### Quick check + balances
+
+```bash
+# orchestrator + indexer + chain reachable?
+curl -s http://localhost:3001/healthz | jq
+curl -s http://localhost:3002/healthz | jq
+
+# what's my ETH / USDC on anvil?
+cast balance  0xYOUR_WALLET_ADDRESS --rpc-url http://localhost:8545 --ether
+cast call     0xe7f1725e7734ce288f8367e1bb143e90bb3f0512 \
+              "balanceOf(address)(uint256)" 0xYOUR_WALLET_ADDRESS \
+              --rpc-url http://localhost:8545
+
+# recent on-chain Settled events
+curl -s "http://localhost:3002/events?limit=5" | jq
+```
+
 ## API surface
 
 ### Orchestrator (`:3001`)

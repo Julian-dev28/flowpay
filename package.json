@@ -3,12 +3,12 @@
   "version": "0.0.1",
   "private": true,
   "scripts": {
-    "dev": "turbo run dev",
+    "dev": "pnpm -F @flowpay/frontend dev",
+    "stack": "bash scripts/dev-stack.sh",
+    "demo": "pnpm -F @flowpay/scripts demo",
     "build": "turbo run build",
     "test": "turbo run test",
-    "lint": "turbo run lint",
-    "stack": "bash scripts/dev-stack.sh",
-    "demo": "pnpm -F @flowpay/scripts demo"
+    "lint": "turbo run lint"
   },
   "devDependencies": {
     "turbo": "2.3.3"

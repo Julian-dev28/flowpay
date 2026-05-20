@@ -49,8 +49,8 @@ pnpm install
 # Terminal 1: anvil + contracts + orchestrator + tx-submitter + indexer
 pnpm stack
 
-# Terminal 2: frontend
-pnpm -F @flowpay/frontend dev    # http://localhost:3000
+# Terminal 2: frontend (pnpm dev is an alias)
+pnpm dev                          # http://localhost:3000
 ```
 
 That's it. `pnpm stack` deploys `PaymentRouter` + `MockUSDC` to anvil, mints
@@ -58,6 +58,12 @@ the demo payer 1,000,000 MockUSDC, and starts the three backend services
 with the right envs already wired. The frontend's defaults match the
 deterministic anvil addresses, so connecting any wallet to chain id 31337
 and clicking *Sign & pay* will land an on-chain `settle()` transaction.
+
+> Don't run the backend services with `turbo run dev` — each service needs
+> a coordinated startup (anvil first, then contracts deployed, then the
+> services with router/relayer envs). `pnpm stack` does that orchestration;
+> the per-service `pnpm -F @flowpay/<svc> dev` commands are for debugging
+> one service in isolation.
 
 ### Fire a payment without the UI
 

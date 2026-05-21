@@ -19,5 +19,7 @@ contracts/cache/
 contracts/out/
 contracts/broadcast/
 
-# Local dev stack logs
+# Local dev stack logs + SQLite data dirs
 .dev-logs/
+.data/
+services/*/.data/

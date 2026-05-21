@@ -66,6 +66,11 @@ done
 echo "▶ flushing redis…"
 redis-cli FLUSHDB > /dev/null
 
+# Anvil state is in-memory — clear the service DBs too so we don't index
+# events from a previous anvil run that no longer exist on the live chain.
+echo "▶ resetting service databases…"
+rm -rf "$ROOT/.data"
+
 echo "▶ starting anvil…"
 anvil --chain-id 31337 --port "$ANVIL_PORT" > "$LOG_DIR/anvil.log" 2>&1 &
 PIDS+=($!)
@@ -105,6 +110,8 @@ echo "▶ starting orchestrator on :$ORCH_PORT…"
     PORT="$ORCH_PORT" \
     LOG_LEVEL=info \
     CORS_ORIGINS="http://localhost:3000,http://127.0.0.1:3000" \
+    DATABASE_PATH="$ROOT/.data/orchestrator.sqlite" \
+    INDEXER_URL="http://localhost:$IDX_PORT" \
     FAUCET_ENABLED=true \
     FAUCET_RPC_URL="http://localhost:$ANVIL_PORT" \
     FAUCET_CHAIN_ID=31337 \
@@ -132,6 +139,9 @@ echo "▶ starting indexer on :$IDX_PORT…"
     RPC_URL="http://localhost:$ANVIL_PORT" \
     PORT="$IDX_PORT" \
     CORS_ORIGINS="http://localhost:3000,http://127.0.0.1:3000" \
+    DATABASE_PATH="$ROOT/.data/indexer.sqlite" \
+    CONFIRMATIONS=1 \
+    BACKFILL_FROM_BLOCK=0 \
     LOG_LEVEL=info \
     npx tsx src/main.ts > "$LOG_DIR/indexer.log" 2>&1 ) &
 PIDS+=($!)

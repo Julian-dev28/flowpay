@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useEffect, useCallback } from "react";
+import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import {
   useAccount,
   useChainId,
@@ -10,7 +10,6 @@ import {
   useWaitForTransactionReceipt,
   useSwitchChain,
   useBlockNumber,
-  usePublicClient,
 } from "wagmi";
 import { foundry, baseSepolia, base } from "wagmi/chains";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
@@ -27,15 +26,11 @@ const SUPPORTED: Record<number, { name: string; explorer?: string }> = {
   [base.id]: { name: "Base", explorer: "https://basescan.org" },
 };
 
-// The PaymentRouter in the demo defaults is deterministic-anvil-only, so the
-// signing chainId must match anvil's chainId (31337). Signing against any
-// other chain produces an EIP-712 domain separator mismatch and the contract
-// reverts with InvalidSignature() — that's the InvalidSignature error you'll
-// see in the wallet/relayer if you skip this guard.
+// PaymentRouter is anvil-only in this demo; the EIP-712 domain separator
+// includes chainId, so signing against any other chain → InvalidSignature.
 const TARGET_CHAIN_ID = foundry.id;
 
-// Anvil demo defaults from `forge script DeployDemo.s.sol` (deterministic on
-// a fresh anvil). Overridable via the form.
+// Deterministic anvil addresses from `forge script DeployDemo.s.sol`.
 const DEFAULTS = {
   router: "0x5fbdb2315678afecb367f032d93f642f64180aa3" as Address,
   token: "0xe7f1725e7734ce288f8367e1bb143e90bb3f0512" as Address,
@@ -53,18 +48,39 @@ const PAYMENT_ORDER_TYPES = {
   ],
 } as const;
 
+// ── Types ───────────────────────────────────────────────────────────────────
 type Phase =
   | { stage: "idle" }
   | { stage: "signing" }
-  | { stage: "submitted"; jobId: string; paymentId: string; nonce: bigint }
+  | { stage: "queued"; paymentId: string; jobId?: string; nonce: bigint }
+  | { stage: "submitting"; paymentId: string; jobId?: string; nonce: bigint }
+  | { stage: "submitted"; paymentId: string; jobId?: string; nonce: bigint; txHash: string }
   | {
       stage: "settled";
-      jobId: string;
       paymentId: string;
+      jobId?: string;
+      nonce: bigint;
       txHash: string;
       blockNumber: string;
+      confirmations: number | null;
     }
-  | { stage: "failed"; reason: string };
+  | { stage: "failed"; reason: string; paymentId?: string };
+
+type IntentRow = {
+  id: string;
+  payer: string;
+  merchant: string;
+  token: string;
+  amount: string;
+  nonce: string;
+  deadline: string;
+  status: "queued" | "submitting" | "submitted" | "settled" | "failed";
+  jobId: string | null;
+  txHash: string | null;
+  failureReason: string | null;
+  createdAt: number;
+  updatedAt: number;
+};
 
 type SettledEvent = {
   orderHash: string;
@@ -75,12 +91,25 @@ type SettledEvent = {
   nonce: string;
   txHash: string;
   blockNumber: string;
-  timestamp: number;
+  logIndex: number;
+  indexedAt: number;
+  confirmations: number | null;
+  final: boolean | null;
 };
 
+// ── Helpers ─────────────────────────────────────────────────────────────────
 function short(addr?: string) {
   if (!addr) return "";
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
+}
+
+function relTime(ts: number) {
+  const d = Math.floor((Date.now() - ts) / 1000);
+  if (d < 5) return "just now";
+  if (d < 60) return `${d}s ago`;
+  if (d < 3600) return `${Math.floor(d / 60)}m ago`;
+  if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
+  return `${Math.floor(d / 86400)}d ago`;
 }
 
 function Addr({ value, explorer }: { value?: string; explorer?: string }) {
@@ -114,26 +143,29 @@ function Addr({ value, explorer }: { value?: string; explorer?: string }) {
   );
 }
 
-function relTime(ts: number) {
-  const d = Math.floor((Date.now() - ts) / 1000);
-  if (d < 5) return "just now";
-  if (d < 60) return `${d}s ago`;
-  if (d < 3600) return `${Math.floor(d / 60)}m ago`;
-  if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
-  return `${Math.floor(d / 86400)}d ago`;
+function statusChipClass(status: IntentRow["status"]) {
+  switch (status) {
+    case "settled":
+      return "chip success";
+    case "failed":
+      return "chip danger";
+    case "submitted":
+    case "submitting":
+      return "chip warning";
+    default:
+      return "chip";
+  }
 }
 
+// ── Page ────────────────────────────────────────────────────────────────────
 export default function Home() {
   const { isConnected, address } = useAccount();
   const chainId = useChainId();
   const { switchChain, isPending: isSwitching } = useSwitchChain();
   const { signTypedDataAsync, isPending: isSigning } = useSignTypedData();
   const { writeContractAsync, isPending: isApproving } = useWriteContract();
-  const publicClient = usePublicClient();
 
   const knownChain = SUPPORTED[chainId];
-  // For the demo, the router only exists on anvil. Any other chain ID means
-  // signing will produce an InvalidSignature when settle() runs.
   const wrongNetwork = isConnected && chainId !== TARGET_CHAIN_ID;
 
   const [merchant, setMerchant] = useState<string>(DEFAULTS.merchant);
@@ -144,6 +176,7 @@ export default function Home() {
   const [phase, setPhase] = useState<Phase>({ stage: "idle" });
   const [error, setError] = useState<string | null>(null);
   const [events, setEvents] = useState<SettledEvent[]>([]);
+  const [history, setHistory] = useState<IntentRow[]>([]);
   const [orchestratorOnline, setOrchestratorOnline] = useState<boolean | null>(null);
   const [indexerOnline, setIndexerOnline] = useState<boolean | null>(null);
   const [faucet, setFaucet] = useState<{ enabled: boolean; ethDrop?: string; tokenDrop?: string } | null>(null);
@@ -154,7 +187,7 @@ export default function Home() {
     query: { refetchInterval: 3000 },
   });
 
-  // ── erc-20 reads ─────────────────────────────────────────────────────────
+  // ── ERC-20 reads
   const tokenValid = /^0x[a-fA-F0-9]{40}$/.test(token);
   const merchantValid = /^0x[a-fA-F0-9]{40}$/.test(merchant);
   const routerValid = /^0x[a-fA-F0-9]{40}$/.test(router);
@@ -176,10 +209,7 @@ export default function Home() {
     abi: erc20Abi,
     functionName: "balanceOf",
     args: address ? [address] : undefined,
-    query: {
-      enabled: !!address && tokenValid && !wrongNetwork,
-      refetchInterval: 4000,
-    },
+    query: { enabled: !!address && tokenValid && !wrongNetwork, refetchInterval: 4000 },
   });
   const { data: merchantBalance, refetch: refetchMerchant } = useReadContract({
     address: token as Address,
@@ -218,7 +248,7 @@ export default function Home() {
   const insufficientBalance =
     parsedAmount != null && payerBalance != null && (payerBalance as bigint) < parsedAmount;
 
-  // ── service status pings ─────────────────────────────────────────────────
+  // ── Health pings
   useEffect(() => {
     let cancelled = false;
     async function probe() {
@@ -241,7 +271,7 @@ export default function Home() {
           setFaucet(j);
         }
       } catch {
-        /* faucet may be disabled — fine */
+        /* faucet may be disabled */
       }
     }
     probe();
@@ -252,33 +282,7 @@ export default function Home() {
     };
   }, []);
 
-  async function handleFaucet() {
-    if (!address) return;
-    setFaucetBusy(true);
-    setError(null);
-    try {
-      const res = await fetch(`${ORCHESTRATOR_URL}/faucet`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ address }),
-      });
-      const j = await res.json();
-      if (!res.ok) {
-        setError(`faucet: ${j.error ?? res.status}`);
-      } else {
-        // poll until the new balance shows up — refetch immediately and then
-        // a couple more times to ride out the next block.
-        setTimeout(() => refetchPayer(), 800);
-        setTimeout(() => refetchPayer(), 2400);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setFaucetBusy(false);
-    }
-  }
-
-  // ── activity feed polling ────────────────────────────────────────────────
+  // ── Activity feed (global) ────────────────────────────────────────────────
   const loadEvents = useCallback(async () => {
     try {
       const res = await fetch(`${INDEXER_URL}/events?limit=20`, { cache: "no-store" });
@@ -286,7 +290,7 @@ export default function Home() {
       const json = (await res.json()) as { events: SettledEvent[] };
       setEvents(json.events ?? []);
     } catch {
-      /* swallow — UI keeps last known state */
+      /* keep last known state */
     }
   }, []);
   useEffect(() => {
@@ -295,63 +299,115 @@ export default function Home() {
     return () => clearInterval(t);
   }, [loadEvents]);
 
-  // ── lifecycle: poll job + watch indexer for matching event ──────────────
+  // ── Per-wallet history (orchestrator's intent table) ─────────────────────
+  const loadHistory = useCallback(async () => {
+    if (!address) return;
+    try {
+      const res = await fetch(
+        `${ORCHESTRATOR_URL}/payments?payer=${address}&limit=20`,
+        { cache: "no-store" }
+      );
+      if (!res.ok) return;
+      const json = (await res.json()) as { payments: IntentRow[] };
+      setHistory(json.payments ?? []);
+    } catch {
+      /* keep last known state */
+    }
+  }, [address]);
   useEffect(() => {
-    if (phase.stage !== "submitted") return;
-    const submitted = phase; // capture narrowed type for the closure
+    loadHistory();
+    const t = setInterval(loadHistory, 4000);
+    return () => clearInterval(t);
+  }, [loadHistory]);
+
+  // ── Lifecycle: drive phase from orchestrator + indexer ───────────────────
+  const phaseRef = useRef(phase);
+  phaseRef.current = phase;
+
+  useEffect(() => {
+    const active =
+      phase.stage === "queued" ||
+      phase.stage === "submitting" ||
+      phase.stage === "submitted";
+    if (!active) return;
+    const paymentId = phase.paymentId;
     let cancelled = false;
-    const expectedNonce = submitted.nonce.toString();
-    const expectedPayer = address?.toLowerCase();
 
     async function tick() {
-      // 1) BullMQ job state (fail-fast surface)
       try {
-        const res = await fetch(`${ORCHESTRATOR_URL}/payments/${submitted.jobId}`, {
+        const res = await fetch(`${ORCHESTRATOR_URL}/payments/${paymentId}`, {
           cache: "no-store",
         });
-        if (res.ok) {
-          const j = await res.json();
-          if (!cancelled && j.state === "failed") {
-            setPhase({ stage: "failed", reason: j.failedReason ?? "unknown failure" });
-            return;
-          }
+        if (!res.ok) return;
+        const intent = (await res.json()) as IntentRow;
+        if (cancelled) return;
+        if (intent.status === "failed") {
+          setPhase({
+            stage: "failed",
+            reason: intent.failureReason ?? "unknown failure",
+            paymentId,
+          });
+          return;
         }
-      } catch {}
-
-      // 2) matching Settled event from indexer = source of truth
-      try {
-        const res = await fetch(`${INDEXER_URL}/events?limit=50`, { cache: "no-store" });
-        if (res.ok) {
-          const j = (await res.json()) as { events: SettledEvent[] };
-          const match = j.events.find(
-            (e) =>
-              e.nonce === expectedNonce &&
-              (!expectedPayer || e.payer.toLowerCase() === expectedPayer)
+        // Pull tx info / confirmations from the indexer once we have a tx.
+        if (intent.status === "settled" && intent.txHash) {
+          const ev = await fetch(
+            `${INDEXER_URL}/events/by-nonce/${intent.payer}/${intent.nonce}`,
+            { cache: "no-store" }
+          )
+            .then((r) => (r.ok ? r.json() : null))
+            .catch(() => null);
+          setPhase({
+            stage: "settled",
+            paymentId,
+            jobId: intent.jobId ?? undefined,
+            nonce: BigInt(intent.nonce),
+            txHash: intent.txHash,
+            blockNumber: ev?.blockNumber ?? "—",
+            confirmations: ev?.confirmations ?? null,
+          });
+          refetchPayer();
+          refetchMerchant();
+          loadHistory();
+          loadEvents();
+          return;
+        }
+        if (intent.status === "submitted" && intent.txHash) {
+          setPhase({
+            stage: "submitted",
+            paymentId,
+            jobId: intent.jobId ?? undefined,
+            nonce: BigInt(intent.nonce),
+            txHash: intent.txHash,
+          });
+          return;
+        }
+        if (intent.status === "submitting") {
+          setPhase((prev) =>
+            prev.stage === "queued"
+              ? {
+                  stage: "submitting",
+                  paymentId,
+                  jobId: intent.jobId ?? undefined,
+                  nonce: BigInt(intent.nonce),
+                }
+              : prev
           );
-          if (match && !cancelled) {
-            setPhase({
-              stage: "settled",
-              jobId: submitted.jobId,
-              paymentId: submitted.paymentId,
-              txHash: match.txHash,
-              blockNumber: match.blockNumber,
-            });
-            refetchMerchant();
-            refetchPayer();
-            loadEvents();
-          }
+          return;
         }
-      } catch {}
+      } catch {
+        /* transient — keep state */
+      }
     }
     tick();
-    const t = setInterval(tick, 1500);
+    const t = setInterval(tick, 1200);
     return () => {
       cancelled = true;
       clearInterval(t);
     };
-  }, [phase, address, loadEvents, refetchMerchant, refetchPayer]);
+  }, [phase, loadHistory, loadEvents, refetchPayer, refetchMerchant]);
 
-  // ── handlers ─────────────────────────────────────────────────────────────
+  // ── Approval flow ─────────────────────────────────────────────────────────
   const [approveHash, setApproveHash] = useState<Hex | null>(null);
   const { isLoading: isApprovingTx, isSuccess: approveConfirmed } = useWaitForTransactionReceipt({
     hash: approveHash ?? undefined,
@@ -376,6 +432,30 @@ export default function Home() {
     }
   }
 
+  async function handleFaucet() {
+    if (!address) return;
+    setFaucetBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(`${ORCHESTRATOR_URL}/faucet`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ address }),
+      });
+      const j = await res.json();
+      if (!res.ok) setError(`faucet: ${j.error ?? res.status}`);
+      else {
+        setTimeout(() => refetchPayer(), 800);
+        setTimeout(() => refetchPayer(), 2400);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setFaucetBusy(false);
+    }
+  }
+
+  // ── Pay flow (sign → POST /pay with Idempotency-Key) ─────────────────────
   async function handlePay() {
     if (!address || parsedAmount == null) return;
     setError(null);
@@ -413,9 +493,15 @@ export default function Home() {
         signature,
       };
 
+      // Idempotency key — a retry from a flaky network will dedup server-side.
+      const idemKey = crypto.randomUUID();
+
       const res = await fetch(`${ORCHESTRATOR_URL}/pay`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": idemKey,
+        },
         body: JSON.stringify(body),
       });
       const json = await res.json();
@@ -424,11 +510,12 @@ export default function Home() {
         return;
       }
       setPhase({
-        stage: "submitted",
-        jobId: String(json.jobId),
+        stage: "queued",
         paymentId: String(json.paymentId),
+        jobId: json.jobId ? String(json.jobId) : undefined,
         nonce,
       });
+      loadHistory();
     } catch (err) {
       setPhase({
         stage: "failed",
@@ -442,12 +529,85 @@ export default function Home() {
     setError(null);
   }
 
-  // ── derived view state ───────────────────────────────────────────────────
-  const failed = phase.stage === "failed";
+  // ── Derived UI ────────────────────────────────────────────────────────────
   const explorer = knownChain?.explorer;
+  const failed = phase.stage === "failed";
+
+  // Off-chain vs on-chain step status
+  const offChainSteps: Array<{ key: string; label: string; status: "pending" | "active" | "done" | "failed"; meta?: string }> = [
+    {
+      key: "sign",
+      label: "Wallet signature (EIP-712)",
+      status:
+        phase.stage === "idle"
+          ? "pending"
+          : phase.stage === "signing"
+            ? "active"
+            : phase.stage === "failed" && !("paymentId" in phase && phase.paymentId)
+              ? "failed"
+              : "done",
+    },
+    {
+      key: "submit",
+      label: "Orchestrator validates + enqueues",
+      status:
+        phase.stage === "queued"
+          ? "active"
+          : phase.stage === "submitting" ||
+              phase.stage === "submitted" ||
+              phase.stage === "settled"
+            ? "done"
+            : phase.stage === "failed" && "paymentId" in phase && phase.paymentId
+              ? "failed"
+              : "pending",
+      meta:
+        "paymentId" in phase && phase.paymentId
+          ? `id ${short(phase.paymentId)}`
+          : undefined,
+    },
+    {
+      key: "pickup",
+      label: "Relayer picks up the job",
+      status:
+        phase.stage === "submitting"
+          ? "active"
+          : phase.stage === "submitted" || phase.stage === "settled"
+            ? "done"
+            : "pending",
+    },
+  ];
+
+  const onChainSteps: Array<{ key: string; label: string; status: "pending" | "active" | "done"; meta?: string }> = [
+    {
+      key: "broadcast",
+      label: "settle() broadcast",
+      status:
+        phase.stage === "submitted"
+          ? "active"
+          : phase.stage === "settled"
+            ? "done"
+            : "pending",
+      meta:
+        (phase.stage === "submitted" || phase.stage === "settled") && phase.txHash
+          ? short(phase.txHash)
+          : undefined,
+    },
+    {
+      key: "indexed",
+      label: "Indexed (Settled event)",
+      status: phase.stage === "settled" ? "done" : "pending",
+      meta:
+        phase.stage === "settled"
+          ? `block #${phase.blockNumber}${
+              phase.confirmations != null ? ` · ${phase.confirmations} conf` : ""
+            }`
+          : undefined,
+    },
+  ];
 
   return (
     <div className="shell">
+      {/* ── nav ───────────────────────────────────────────────────────── */}
       <nav className="nav">
         <div className="brand">
           <div className="brand-mark" />
@@ -482,6 +642,7 @@ export default function Home() {
         </div>
       </nav>
 
+      {/* ── hero ──────────────────────────────────────────────────────── */}
       <header className="hero">
         <div className="eyebrow">
           <span className="dot" />
@@ -493,8 +654,9 @@ export default function Home() {
         <p>
           Payers sign a typed payment intent off-chain. A relayer settles it
           on-chain through <span className="mono">PaymentRouter.settle()</span>,
-          which pushes the funds directly from the payer to the merchant —
-          the router never holds balance.
+          which pushes funds directly from the payer to the merchant — the
+          router never holds balance. Every intent is persisted, idempotent on
+          retry, and reconciled against the on-chain index.
         </p>
         {wrongNetwork && (
           <div className="result error" style={{ marginBottom: 18 }}>
@@ -518,7 +680,7 @@ export default function Home() {
       </header>
 
       <section id="demo" className="grid">
-        {/* ── compose ──────────────────────────────────────────── */}
+        {/* ── compose ─────────────────────────────────────────────────── */}
         <div className="card">
           <div className="card-header">
             <div>
@@ -547,8 +709,6 @@ export default function Home() {
                 )}
               </span>
             )}
-            {/* On the anvil demo we expose a faucet so any connected wallet
-                can self-fund without importing the demo payer's private key. */}
             {address &&
               !wrongNetwork &&
               faucet?.enabled &&
@@ -601,19 +761,17 @@ export default function Home() {
               Connect a wallet to continue.
             </p>
           ) : needsApproval ? (
-            <div className="inline-action">
-              <button
-                className="btn full"
-                onClick={handleApprove}
-                disabled={isApproving || isApprovingTx || !tokenValid || !routerValid || wrongNetwork}
-              >
-                {isApproving
-                  ? "Confirm approval in wallet…"
-                  : isApprovingTx
-                    ? "Approving on-chain…"
-                    : `Approve router to spend ${symbol}`}
-              </button>
-            </div>
+            <button
+              className="btn full"
+              onClick={handleApprove}
+              disabled={isApproving || isApprovingTx || !tokenValid || !routerValid || wrongNetwork}
+            >
+              {isApproving
+                ? "Confirm approval in wallet…"
+                : isApprovingTx
+                  ? "Approving on-chain…"
+                  : `Approve router to spend ${symbol}`}
+            </button>
           ) : (
             <button
               className="btn full"
@@ -624,6 +782,8 @@ export default function Home() {
                 parsedAmount == null ||
                 insufficientBalance ||
                 phase.stage === "signing" ||
+                phase.stage === "queued" ||
+                phase.stage === "submitting" ||
                 phase.stage === "submitted" ||
                 isSigning
               }
@@ -632,9 +792,13 @@ export default function Home() {
                 ? "Switch network to continue"
                 : phase.stage === "signing" || isSigning
                   ? "Sign in wallet…"
-                  : phase.stage === "submitted"
-                    ? "Awaiting settlement…"
-                    : `Sign & pay ${amountStr || "0"} ${symbol}`}
+                  : phase.stage === "queued"
+                    ? "Queued — awaiting relayer…"
+                    : phase.stage === "submitting"
+                      ? "Relayer broadcasting…"
+                      : phase.stage === "submitted"
+                        ? "Broadcast — awaiting indexer…"
+                        : `Sign & pay ${amountStr || "0"} ${symbol}`}
             </button>
           )}
 
@@ -642,40 +806,44 @@ export default function Home() {
 
           {(phase.stage !== "idle" || error) && (
             <>
-              <h3>Order lifecycle</h3>
+              <h3>Off-chain pipeline</h3>
               <div className="steps">
-                {[
-                  { key: "sign", label: "Wallet signature (EIP-712)" },
-                  { key: "queue", label: "Orchestrator validated, BullMQ enqueued" },
-                  { key: "submit", label: "Relayer submitted settle() on-chain" },
-                  { key: "indexed", label: "Settled event indexed" },
-                ].map((s, i) => {
-                  let cls = "step";
-                  if (failed && i === 0 && phase.stage === "failed") cls = "step failed";
-                  else if (phase.stage === "settled") cls = "step done";
-                  else if (phase.stage === "submitted" && i < 2) cls = "step done";
-                  else if (phase.stage === "submitted" && i === 2) cls = "step active";
-                  else if (phase.stage === "signing" && i === 0) cls = "step active";
-                  return (
-                    <div key={s.key} className={cls}>
-                      <span className="num">{i + 1}</span>
-                      <span className="label">{s.label}</span>
-                      <span className="meta">
-                        {i === 2 && phase.stage === "settled" && explorer ? (
+                {offChainSteps.map((s, i) => (
+                  <div
+                    key={s.key}
+                    className={`step${s.status === "active" ? " active" : s.status === "done" ? " done" : s.status === "failed" ? " failed" : ""}`}
+                  >
+                    <span className="num">{i + 1}</span>
+                    <span className="label">{s.label}</span>
+                    <span className="meta">{s.meta ?? ""}</span>
+                  </div>
+                ))}
+              </div>
+
+              <h3 style={{ marginTop: 18 }}>On-chain pipeline</h3>
+              <div className="steps">
+                {onChainSteps.map((s, i) => (
+                  <div
+                    key={s.key}
+                    className={`step${s.status === "active" ? " active" : s.status === "done" ? " done" : ""}`}
+                  >
+                    <span className="num">{offChainSteps.length + i + 1}</span>
+                    <span className="label">{s.label}</span>
+                    <span className="meta">
+                      {s.key === "broadcast" && (phase.stage === "submitted" || phase.stage === "settled") && phase.txHash ? (
+                        explorer ? (
                           <a className="ext-link" href={`${explorer}/tx/${phase.txHash}`} target="_blank" rel="noreferrer">
                             {short(phase.txHash)}
                           </a>
-                        ) : i === 2 && phase.stage === "settled" ? (
-                          short(phase.txHash)
-                        ) : i === 3 && phase.stage === "settled" ? (
-                          `block #${phase.blockNumber}`
                         ) : (
-                          ""
-                        )}
-                      </span>
-                    </div>
-                  );
-                })}
+                          short(phase.txHash)
+                        )
+                      ) : (
+                        s.meta ?? ""
+                      )}
+                    </span>
+                  </div>
+                ))}
               </div>
 
               {phase.stage === "failed" && (
@@ -697,24 +865,73 @@ export default function Home() {
           )}
         </div>
 
-        {/* ── right column ─────────────────────────────────────── */}
+        {/* ── right column ─────────────────────────────────────────── */}
         <aside style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          {/* My payments (per-wallet history from orchestrator's intent DB) */}
+          {address && (
+            <div className="card">
+              <div className="card-header" style={{ marginBottom: 0 }}>
+                <h2>My payments</h2>
+                <span className="chip">{history.length} stored</span>
+              </div>
+              <p className="card-sub" style={{ marginBottom: 14 }}>
+                Persisted payment intents for <Addr value={address} explorer={explorer} />.
+              </p>
+              {history.length === 0 ? (
+                <div className="empty">No payments yet. Submit one above.</div>
+              ) : (
+                <div className="feed">
+                  {history.map((p) => (
+                    <div className="feed-row" key={p.id}>
+                      <div className="primary">
+                        <span>
+                          →{" "}<Addr value={p.merchant} explorer={explorer} />
+                          {p.txHash && (
+                            <>
+                              {" "}·{" "}
+                              {explorer ? (
+                                <a className="ext-link" href={`${explorer}/tx/${p.txHash}`} target="_blank" rel="noreferrer">
+                                  {short(p.txHash)}
+                                </a>
+                              ) : (
+                                <span className="mono">{short(p.txHash)}</span>
+                              )}
+                            </>
+                          )}
+                        </span>
+                        <span className="mono">id {short(p.id)} · nonce {p.nonce}</span>
+                      </div>
+                      <div className="right">
+                        <span className="amount-pill">
+                          {formatUnits(BigInt(p.amount), decimals)} {symbol}
+                        </span>
+                        <span className={statusChipClass(p.status)} style={{ fontSize: 11 }}>
+                          {p.status}
+                        </span>
+                        <span>{relTime(p.createdAt)}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Recent on-chain settlements (global, from indexer) */}
           <div className="card">
             <div className="card-header" style={{ marginBottom: 0 }}>
-              <h2>Activity</h2>
-              <span className="chip">{events.length} recent</span>
+              <h2>On-chain activity</h2>
+              <span className="chip">{events.length} indexed</span>
             </div>
             <p className="card-sub" style={{ marginBottom: 14 }}>
-              Live <span className="mono">Settled</span> events from the indexer.
+              Live <span className="mono">Settled</span> events from the indexer (Postgres-shaped SQLite locally).
             </p>
             {events.length === 0 ? (
-              <div className="empty">
-                No Settled events yet. Submit a payment to see it appear here.
-              </div>
+              <div className="empty">No Settled events yet.</div>
             ) : (
               <div className="feed">
                 {events.map((e) => (
-                  <div className="feed-row" key={`${e.txHash}-${e.nonce}`}>
+                  <div className="feed-row" key={`${e.txHash}-${e.logIndex}`}>
                     <div className="primary">
                       <span>
                         <Addr value={e.payer} explorer={explorer} /> →{" "}
@@ -729,13 +946,14 @@ export default function Home() {
                           short(e.txHash)
                         )}
                         {" · block "}#{e.blockNumber}
+                        {e.confirmations != null && ` · ${e.confirmations} conf`}
                       </span>
                     </div>
                     <div className="right">
                       <span className="amount-pill">
                         {formatUnits(BigInt(e.amount), decimals)} {symbol}
                       </span>
-                      <span>{relTime(e.timestamp)}</span>
+                      <span>{relTime(e.indexedAt)}</span>
                     </div>
                   </div>
                 ))}
@@ -754,7 +972,7 @@ export default function Home() {
             <div className="kv">
               <span className="k">Block</span>
               <span className="v">
-                {publicClient && blockNumber != null ? `#${blockNumber.toString()}` : "—"}
+                {blockNumber != null ? `#${blockNumber.toString()}` : "—"}
               </span>
             </div>
             <div className="kv">
@@ -801,14 +1019,16 @@ export default function Home() {
               <span className="chip">Foundry</span>
               <span className="chip">Fastify 5</span>
               <span className="chip">BullMQ 5</span>
+              <span className="chip">SQLite (better-sqlite3)</span>
               <span className="chip">viem 2</span>
               <span className="chip">Next.js 15</span>
               <span className="chip">wagmi 2</span>
               <span className="chip">RainbowKit 2</span>
-              <span className="chip">TanStack Query</span>
             </div>
             <p className="card-sub" style={{ marginTop: 14 }}>
-              10/10 forge tests · 100% PaymentRouter coverage · CI on every PR.
+              10/10 forge tests · 100% PaymentRouter coverage · idempotent
+              POST /pay · serialized relayer nonce manager · indexed events
+              with confirmation tracking · CI on every PR.
             </p>
           </div>
         </aside>

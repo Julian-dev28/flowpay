@@ -2,7 +2,7 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import { env } from "./env";
 import promClient from "prom-client";
-import { Queue } from "bullmq";
+import { Queue, QueueEvents } from "bullmq";
 import IORedis from "ioredis";
 import { PayRequestSchema, QuoteRequestSchema, FaucetRequestSchema } from "./schemas";
 import { randomUUID } from "crypto";
@@ -18,7 +18,10 @@ import {
   type Hex,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+import { openDb } from "./db";
 // types/fastify.d.ts augments FastifyRequest with `requestId` and `startTime`
+
+const db = openDb(env.DATABASE_PATH);
 
 const app = Fastify({
   logger: {
@@ -290,27 +293,121 @@ app.post("/faucet", async (request, reply) => {
   }
 });
 
-// Payment job status — frontend polls this to drive its lifecycle UI.
-app.get<{ Params: { jobId: string } }>("/payments/:jobId", async (request, reply) => {
-  const job = await paymentQueue.getJob(request.params.jobId);
-  if (!job) {
-    return reply.code(404).send({ error: "job not found" });
+// ── BullMQ event stream → DB intent updates ─────────────────────────────────
+// Worker reports returnvalue { status: "submitted", txHash } or throws on failure.
+// We mirror that into the payment_intents table so the API can serve a stable,
+// query-able view of the intent lifecycle even if the worker isn't running.
+const queueEvents = new QueueEvents("payment.submit", { connection });
+
+type JobReturn = { status: string; txHash?: string; paymentId?: string };
+
+queueEvents.on("active", ({ jobId }) => {
+  const job = paymentQueue.getJob(jobId);
+  job.then((j) => {
+    const id = j?.data?.paymentId;
+    if (id) db.updateStatus({ id, status: "submitting" });
+  });
+});
+
+queueEvents.on("completed", async ({ jobId, returnvalue }) => {
+  try {
+    const ret = typeof returnvalue === "string" ? (JSON.parse(returnvalue) as JobReturn) : (returnvalue as unknown as JobReturn);
+    const job = await paymentQueue.getJob(jobId);
+    const id = job?.data?.paymentId;
+    if (!id) return;
+    if (ret?.status === "submitted" && ret.txHash) {
+      db.updateStatus({ id, status: "submitted", txHash: ret.txHash });
+    } else if (ret?.status === "stub") {
+      db.updateStatus({ id, status: "submitted", failureReason: "stub mode" });
+    }
+  } catch (err) {
+    logger.warn({ err }, "queueEvents completed handler failed");
   }
-  const state = await job.getState();
+});
+
+queueEvents.on("failed", async ({ jobId, failedReason }) => {
+  try {
+    const job = await paymentQueue.getJob(jobId);
+    const id = job?.data?.paymentId;
+    if (id) db.updateStatus({ id, status: "failed", failureReason: failedReason });
+  } catch (err) {
+    logger.warn({ err }, "queueEvents failed handler failed");
+  }
+});
+
+// Payment lookup — DB-backed, cross-checks indexer for the final settle event.
+async function reconcileSettled(intent: ReturnType<typeof db.findById>) {
+  if (!intent) return intent;
+  if (intent.status === "settled") return intent;
+  try {
+    const url = `${env.INDEXER_URL}/events/by-nonce/${intent.payer}/${intent.nonce}`;
+    const res = await fetch(url);
+    if (res.ok) {
+      const event = (await res.json()) as { txHash: string; blockNumber: string };
+      db.updateStatus({
+        id: intent.id,
+        status: "settled",
+        txHash: event.txHash ?? intent.tx_hash ?? null,
+      });
+      return db.findById(intent.id);
+    }
+  } catch {
+    /* indexer unreachable — leave intent in whatever state BullMQ reported */
+  }
+  return intent;
+}
+
+app.get<{ Params: { id: string } }>("/payments/:id", async (request, reply) => {
+  let intent = db.findById(request.params.id);
+  if (!intent) return reply.code(404).send({ error: "payment not found" });
+  intent = (await reconcileSettled(intent)) ?? intent;
   return {
-    jobId: job.id,
-    paymentId: job.data?.paymentId,
-    state, // waiting | active | completed | failed | delayed | paused
-    attemptsMade: job.attemptsMade,
-    failedReason: job.failedReason,
-    returnvalue: job.returnvalue,
-    timestamp: job.timestamp,
-    processedOn: job.processedOn,
-    finishedOn: job.finishedOn,
+    id: intent.id,
+    payer: intent.payer,
+    merchant: intent.merchant,
+    token: intent.token,
+    amount: intent.amount,
+    nonce: intent.nonce,
+    deadline: intent.deadline,
+    status: intent.status,
+    jobId: intent.job_id,
+    txHash: intent.tx_hash,
+    failureReason: intent.failure_reason,
+    createdAt: intent.created_at,
+    updatedAt: intent.updated_at,
   };
 });
 
-// Pay endpoint - accept payment intent and enqueue for processing
+app.get<{ Querystring: { payer?: string; limit?: string } }>(
+  "/payments",
+  async (request, reply) => {
+    const { payer, limit } = request.query;
+    if (!payer) return reply.code(400).send({ error: "payer query param required" });
+    const n = Math.min(Math.max(Number.parseInt(limit ?? "20", 10) || 20, 1), 100);
+    const rows = db.listByPayer(payer, n);
+    return {
+      payments: rows.map((r) => ({
+        id: r.id,
+        payer: r.payer,
+        merchant: r.merchant,
+        token: r.token,
+        amount: r.amount,
+        nonce: r.nonce,
+        deadline: r.deadline,
+        status: r.status,
+        jobId: r.job_id,
+        txHash: r.tx_hash,
+        failureReason: r.failure_reason,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at,
+      })),
+    };
+  }
+);
+
+// Pay endpoint — accept payment intent and enqueue for processing.
+// Honors an optional `Idempotency-Key` header so retries from a flaky client
+// never produce two on-chain settlements.
 app.post("/pay", async (request, reply) => {
   const parseResult = PayRequestSchema.safeParse(request.body);
   if (!parseResult.success) {
@@ -320,9 +417,46 @@ app.post("/pay", async (request, reply) => {
       details: parseResult.error.issues,
     });
   }
-
   const payRequest = parseResult.data;
+
+  const idemKey =
+    typeof request.headers["idempotency-key"] === "string"
+      ? request.headers["idempotency-key"]
+      : null;
+
+  if (idemKey) {
+    const existing = db.findByIdempotency(idemKey);
+    if (existing) {
+      paymentRequestsTotal.inc({ status: "idempotent" });
+      return reply.code(202).send({
+        paymentId: existing.id,
+        jobId: existing.job_id,
+        status: existing.status,
+        idempotent: true,
+      });
+    }
+  }
+
   const paymentId = randomUUID();
+  const now = Date.now();
+
+  db.insert({
+    id: paymentId,
+    idempotency_key: idemKey,
+    payer: payRequest.payer,
+    merchant: payRequest.merchant,
+    token: payRequest.token,
+    amount: payRequest.amount,
+    nonce: payRequest.nonce,
+    deadline: payRequest.deadline,
+    signature: payRequest.signature,
+    status: "queued",
+    job_id: null,
+    tx_hash: null,
+    failure_reason: null,
+    created_at: now,
+    updated_at: now,
+  });
 
   const job = await paymentQueue.add(
     "process-payment",
@@ -332,25 +466,38 @@ app.post("/pay", async (request, reply) => {
     },
     {
       attempts: 3,
-      backoff: {
-        type: "exponential",
-        delay: 1000,
-      },
+      backoff: { type: "exponential", delay: 1000 },
+      removeOnComplete: { count: 200 },
+      removeOnFail: { count: 100 },
     }
   );
 
+  db.updateStatus({ id: paymentId, status: "queued" });
+  // store the job id alongside the intent
+  const intent = db.findById(paymentId);
+  if (intent) {
+    intent.job_id = String(job.id);
+    // SQLite update for job_id specifically
+    db.db
+      .prepare(`UPDATE payment_intents SET job_id = ?, updated_at = ? WHERE id = ?`)
+      .run(String(job.id), Date.now(), paymentId);
+  }
+
   paymentRequestsTotal.inc({ status: "success" });
   reply.code(202).send({
-    jobId: job.id,
     paymentId,
+    jobId: job.id,
+    status: "queued",
   });
 });
 
 // Graceful shutdown
 const shutdown = async () => {
   logger.info("Shutting down orchestrator…");
+  await queueEvents.close();
   await paymentQueue.close();
   await app.close();
+  db.close();
   process.exit(0);
 };
 process.on("SIGTERM", shutdown);

@@ -9,6 +9,11 @@ const envSchema = z.object({
   REDIS_URL: z.string().url().default("redis://localhost:6379"),
   // Comma-separated list of allowed CORS origins, or `*` for any (dev only).
   CORS_ORIGINS: z.string().default("http://localhost:3000,http://127.0.0.1:3000"),
+  // SQLite file for payment intent persistence + idempotency dedup.
+  DATABASE_PATH: z.string().default("./.data/orchestrator.sqlite"),
+  // Indexer URL — orchestrator can read settled events to keep intent state
+  // honest even if a worker's status update is lost.
+  INDEXER_URL: z.string().url().default("http://localhost:3002"),
 
   // ─── faucet (dev only) ────────────────────────────────────────────────────
   // POST /faucet sends ETH + mints MockUSDC to any address on the configured
